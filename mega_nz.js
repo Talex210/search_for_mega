@@ -1,17 +1,20 @@
 // ==UserScript==
-// @name         Mega.nz Indexer (Step 4: The Crawler v3 - DB Fix)
+// @name         Mega.nz Indexer (Step 4: The Crawler v5 - GM Storage)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
-// @require      https://cdn.jsdelivr.net/npm/idb@7/build/umd.js
-// @grant        none
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.listValues
+// @grant        GM.deleteValue
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function() {
     'use strict';
 
     const DB_NAME = 'MegaSearchDB';
-    const DB_VERSION = 2; // 🔥 Подняли версию, чтобы обновить структуру
+    const DB_VERSION = 2;
     const STORE_NAME = 'files';
     let initDone = false;
 
@@ -19,64 +22,94 @@
     const SCROLL_DELAY = 1000;
     const SCROLL_STEP = 600;
 
-    console.log('🔧 Скрипт v3 (DB Fix) загружен.');
+    console.log('🔧 Скрипт v4 (Persistent) загружен.');
 
     // ==============================================
     // --- 1. UI ---
     // ==============================================
-    
-    function createUI() {
-        const btn = document.createElement('button');
-        btn.innerText = '📷 Scan Folder';
-        btn.style.cssText = `
+
+    let uiBtn = null;
+
+    function createUI(initialCount) {
+        if (uiBtn) return; // Защита от дублей
+
+        uiBtn = document.createElement('button');
+        updateButtonText(initialCount);
+
+        uiBtn.style.cssText = `
             position: fixed; bottom: 20px; right: 20px; z-index: 9999;
-            padding: 15px 20px; background-color: #d9272e; color: white;
+            padding: 12px 18px; background-color: #d9272e; color: white;
             border: none; border-radius: 8px; cursor: pointer;
-            font-weight: bold; font-size: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            font-weight: bold; font-size: 14px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            transition: all 0.3s; font-family: 'Segoe UI', sans-serif;
         `;
 
-        btn.onclick = async () => {
-            btn.disabled = true;
-            btn.innerText = '⏳ Scanning...';
-            btn.style.backgroundColor = '#555';
+        uiBtn.onclick = async () => {
+            uiBtn.disabled = true;
+            uiBtn.style.backgroundColor = '#555';
+            uiBtn.innerText = '⏳ Scanning...';
+
             await scanCurrentFolder();
-            btn.innerText = '✅ Done';
-            btn.disabled = false;
-            btn.style.backgroundColor = '#28a745';
-            setTimeout(() => { btn.innerText = '📷 Scan Folder'; btn.style.backgroundColor = '#d9272e'; }, 3000);
+
+            uiBtn.disabled = false;
+            uiBtn.style.backgroundColor = '#28a745';
+            const count = await getDBCount();
+            uiBtn.innerText = `✅ Done (Saved: ${count})`;
+
+            setTimeout(() => {
+                uiBtn.style.backgroundColor = '#d9272e';
+                updateButtonText(count);
+            }, 3000);
         };
 
-        document.body.appendChild(btn);
+        document.body.appendChild(uiBtn);
+    }
+
+    function updateButtonText(count) {
+        if(uiBtn) uiBtn.innerText = `📷 Scan Folder (DB: ${count})`;
     }
 
     // ==============================================
-    // --- 2. База Данных (Улучшенная) ---
+    // --- 2. База Данных (GM Storage, не IndexedDB) ---
     // ==============================================
 
-    async function getDB() {
-        return await idb.openDB(DB_NAME, DB_VERSION, {
-            upgrade(db) {
-                // Если старой таблицы нет - создаем
-                if (!db.objectStoreNames.contains(STORE_NAME)) {
-                    const store = db.createObjectStore(STORE_NAME, { keyPath: 'nodeId' });
-                    store.createIndex('hash', 'hash');
-                    console.log('✨ Создана таблица files');
-                }
-            },
-        });
+    // Все записи храним в хранилище Violentmonkey с префиксом
+    const DB_PREFIX = 'MegaSearchDB_v1:';
+
+    async function getDBCount() {
+        try {
+            const keys = await GM.listValues();
+            // На всякий случай фильтруем по префиксу, если в этом же скрипте
+            // когда‑нибудь будут другие ключи.
+            return keys.filter(k => k.startsWith(DB_PREFIX)).length;
+        } catch (e) {
+            console.error('❌ DB Count Error:', e);
+            return 0;
+        }
     }
 
     async function addFileToDB(fileData) {
         try {
-            const db = await getDB();
-            // Используем put (создаст или обновит)
-            await db.put(STORE_NAME, fileData);
-            // Логируем успешную запись (можно закомментировать, если мешает)
-            console.log(`💾 [DB Saved] ${fileData.name} (ID: ${fileData.nodeId})`);
+            // Ключ — префикс + nodeId, значение — сам объект fileData
+            await GM.setValue(DB_PREFIX + fileData.nodeId, fileData);
         } catch (e) {
-            console.error('❌ Ошибка записи в БД:', e, fileData);
+            console.error('❌ DB Write Error:', e);
         }
     }
+
+    // Глобальная функция для проверки из консоли
+    // Важно: так как скрипт теперь в sandbox-е, публикуем её на unsafeWindow
+    unsafeWindow.checkDB = async function() {
+        const keys = await GM.listValues();
+        const ours = keys.filter(k => k.startsWith(DB_PREFIX));
+        const data = [];
+        for (const key of ours) {
+            data.push(await GM.getValue(key));
+        }
+        console.log(`📊 Статистика БД: Всего записей: ${data.length}`);
+        console.table(data.slice(-5));
+        return data;
+    };
 
     // ==============================================
     // --- 3. Хеширование ---
@@ -86,15 +119,12 @@
         return new Promise((resolve, reject) => {
             try {
                 if (!imgElement || imgElement.naturalWidth < 50) return reject("Too small");
-
                 const size = 32;
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
                 canvas.width = size + 1; canvas.height = size;
-                
                 ctx.drawImage(imgElement, 0, 0, size + 1, size);
                 const imageData = ctx.getImageData(0, 0, size + 1, size).data;
-                
                 let hash = '';
                 for (let y = 0; y < size; y++) {
                     for (let x = 0; x < size; x++) {
@@ -123,11 +153,11 @@
     // ==============================================
 
     async function scanCurrentFolder() {
-        console.log('🚀 Start Scanning...');
+        console.log('🚀 Scanning...');
         const scroller = document.querySelector('.file-block-scrolling');
 
         if (!scroller) {
-            alert('❌ Не найден скролл! Убедись, что ты в режиме сетки.');
+            alert('❌ Скролл не найден! Переключи вид папки.');
             return;
         }
 
@@ -139,47 +169,47 @@
         let stuckCounter = 0;
 
         while (true) {
-            // Ищем картинки внутри ячеек
             const images = scroller.querySelectorAll('.fm-item-img img');
-            
+
             for (let img of images) {
                 try {
-                    // 1. Поиск контейнера с ID
-                    let fileContainer = img.closest('[id^="th_"]') || 
-                                        img.closest('[id^="b_"]') ||
-                                        img.closest('.mega-item-square') ||
-                                        img.parentElement.parentElement;
+                    // 1. Поиск блока и имени
+                    let fileContainer = img.closest('[id^="th_"]') || img.closest('.mega-item-square') || img.parentElement.parentElement;
 
-                    // 2. Извлечение ID
-                    let nodeId = fileContainer ? fileContainer.id : null;
-                    if (!nodeId && fileContainer && fileContainer.dataset.nodeId) nodeId = fileContainer.dataset.nodeId;
+                    // 2. Достаем ИМЯ (оно критически важно для ID)
+                    let name = 'Unknown';
+                    if (fileContainer) {
+                        const nameEl = fileContainer.querySelector('.block-view-file-name') ||
+                                       fileContainer.querySelector('.file-name') ||
+                                       fileContainer.innerText;
+                        if (nameEl) name = (typeof nameEl === 'string' ? nameEl : nameEl.innerText).split('\n')[0].trim();
+                    }
 
-                    // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
-                    // Если ID не найден, генерируем временный уникальный ID, чтобы БД не ругалась
-                    if (!nodeId || nodeId === "") {
-                        const cleanSrc = img.src.substring(0, 50); // Берем часть ссылки
-                        nodeId = "generated_" + cleanSrc.replace(/[^a-zA-Z0-9]/g, '') + "_" + Date.now() + Math.random().toString(36).substring(7);
+                    // 3. Определение ID (Node ID > Name > Src)
+                    let nodeId = null;
+                    if (fileContainer && fileContainer.id && fileContainer.id.startsWith('th_')) {
+                        nodeId = fileContainer.id;
+                    } else if (fileContainer && fileContainer.dataset.nodeId) {
+                        nodeId = fileContainer.dataset.nodeId;
+                    }
+
+                    // 🔥 ВАЖНО: Если нет ID от Меги, используем ИМЯ ФАЙЛА как ID
+                    // Это гарантирует, что при перезагрузке мы обновим запись, а не создадим дубль
+                    if (!nodeId) {
+                        if (name !== 'Unknown' && name.length > 3) {
+                            nodeId = "name_" + name;
+                        } else {
+                            // Крайний случай - используем часть URL
+                            nodeId = "src_" + img.src.substring(img.src.length - 20);
+                        }
                     }
 
                     if (processedIDs.has(nodeId)) continue;
 
-                    // 3. Извлечение имени
-                    let name = 'Unknown';
-                    if (fileContainer) {
-                        const nameEl = fileContainer.querySelector('.block-view-file-name') || 
-                                       fileContainer.querySelector('.file-name') || 
-                                       fileContainer.innerText;
-                        if (nameEl) {
-                             // Берем текст и чистим от переносов строк
-                             name = (typeof nameEl === 'string' ? nameEl : nameEl.innerText).split('\n')[0].trim();
-                        }
-                    }
-
-                    // 4. Хешируем и сохраняем
                     const hash = await getImageHash(img);
-                    
+
                     await addFileToDB({
-                        nodeId: nodeId, // Теперь это поле точно заполнено
+                        nodeId: nodeId,
                         name: name,
                         path: document.title,
                         hash: hash,
@@ -189,53 +219,56 @@
                     processedIDs.add(nodeId);
                     processedCount++;
 
-                } catch (err) {
-                    // Ошибки хеширования
-                }
+                } catch (err) {}
             }
 
-            // Скроллим
+            // Скролл
             const prevScrollTop = scroller.scrollTop;
             scroller.scrollBy(0, SCROLL_STEP);
             await new Promise(r => setTimeout(r, SCROLL_DELAY));
 
             if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) {
                 stuckCounter++;
-                if (stuckCounter >= 2) {
-                    console.log('🛑 Конец списка.');
-                    break;
-                }
-            } else {
-                stuckCounter = 0;
-            }
+                if (stuckCounter >= 2) break;
+            } else { stuckCounter = 0; }
         }
 
-        console.log(`🎉 Сканирование завершено! Обработано: ${processedCount}`);
-        const total = (await window.checkDB()).length;
-        console.log(`ℹ️ Итого в базе: ${total}`);
-        alert(`Готово! Собрано ${processedCount} файлов. Всего в базе: ${total}`);
+        console.log(`🎉 Сканирование завершено. +${processedCount} файлов.`);
+        const total = await getDBCount();
+        console.log(`ℹ️ Всего в базе: ${total}`);
+        updateButtonText(total);
     }
 
-    window.checkDB = async function() {
-        const db = await getDB();
-        const data = await db.getAll(STORE_NAME);
-        console.table(data.slice(-5)); 
-        return data;
-    };
+    // ==============================================
+    // --- 5. Старт ---
+    // ==============================================
 
-    function waitForApp() {
+    async function init() {
+        // Сразу проверяем базу
+        const totalFiles = await getDBCount();
+        console.log(`💾 [STARTUP] База подключена. Сохраненных файлов: ${totalFiles}`);
+
         const checkInterval = setInterval(() => {
             if (initDone) { clearInterval(checkInterval); return; }
+
             const scroller = document.querySelector('.file-block-scrolling');
             if (scroller) {
                 initDone = true;
                 clearInterval(checkInterval);
-                createUI();
-                console.log('✅ Ready to scan.');
+                createUI(totalFiles); // Передаем количество в UI
+                console.log('✅ UI Ready.');
             }
         }, 1000);
     }
 
-    waitForApp();
+    init();
 
-})();
+})();// ==UserScript==
+// @name        New script
+// @namespace   Violentmonkey Scripts
+// @match       *://example.org/*
+// @grant       none
+// @version     1.0
+// @author      -
+// @description 28.11.2025, 00:47:06
+// ==/UserScript==
