@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Indexer (Merged: Hash + SmartDB) Fix infiniti console
+// @name         Mega.nz Indexer (Step 4: The Crawler v2)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -12,15 +12,44 @@
 
     const DB_NAME = 'MegaSearchDB';
     const STORE_NAME = 'files';
-
-    // --- ПРЕДОХРАНИТЕЛЬ ---
-    // Эта переменная гарантирует, что скрипт запустится только 1 раз
     let initDone = false;
 
-    console.log('🔧 Скрипт инициализирован. Ожидание загрузки интерфейса Mega...');
+    // Настройки
+    const SCROLL_DELAY = 1000; // Чуть увеличили задержку для надежности
+    const SCROLL_STEP = 600;   
+
+    console.log('🔧 Скрипт (v2) загружен. Ждем интерфейс...');
 
     // ==============================================
-    // --- 1. Логика Базы Данных (IndexedDB) ---
+    // --- 1. UI ---
+    // ==============================================
+    
+    function createUI() {
+        const btn = document.createElement('button');
+        btn.innerText = '📷 Scan Folder';
+        btn.style.cssText = `
+            position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+            padding: 15px 20px; background-color: #d9272e; color: white;
+            border: none; border-radius: 8px; cursor: pointer;
+            font-weight: bold; font-size: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        `;
+
+        btn.onclick = async () => {
+            btn.disabled = true;
+            btn.innerText = '⏳ Working...';
+            btn.style.backgroundColor = '#555';
+            await scanCurrentFolder();
+            btn.innerText = '✅ Done';
+            btn.disabled = false;
+            btn.style.backgroundColor = '#28a745';
+            setTimeout(() => { btn.innerText = '📷 Scan Folder'; btn.style.backgroundColor = '#d9272e'; }, 3000);
+        };
+
+        document.body.appendChild(btn);
+    }
+
+    // ==============================================
+    // --- 2. База Данных ---
     // ==============================================
 
     async function getDB() {
@@ -29,47 +58,36 @@
                 if (!db.objectStoreNames.contains(STORE_NAME)) {
                     const store = db.createObjectStore(STORE_NAME, { keyPath: 'nodeId' });
                     store.createIndex('hash', 'hash');
-                    console.log('✨ Создано новое хранилище файлов (files)!');
                 }
             },
         });
     }
 
-    window.addFileToDB = async function(fileData) {
+    async function addFileToDB(fileData) {
         try {
             const db = await getDB();
             await db.put(STORE_NAME, fileData);
-            console.log(`✅ [БД] Записан файл: ${fileData.name} (ID: ${fileData.nodeId})`);
-        } catch (e) {
-            console.error('❌ Ошибка записи в БД:', e);
-        }
-    };
-
-    window.checkDB = async function() {
-        const db = await getDB();
-        const allFiles = await db.getAll(STORE_NAME);
-        console.log(`📂 Файлов в базе: ${allFiles.length}`);
-        console.table(allFiles);
-        return allFiles;
-    };
+        } catch (e) { console.error('DB Error:', e); }
+    }
 
     // ==============================================
-    // --- 2. Логика Хеширования (Perceptual Hash) ---
+    // --- 3. Хеширование ---
     // ==============================================
 
-    window.getImageHash = function(imgElement) {
+    function getImageHash(imgElement) {
         return new Promise((resolve, reject) => {
             try {
-                if (!imgElement) return reject("Нет элемента изображения");
+                // Игнорируем мелкие иконки и незагруженные
+                if (!imgElement || imgElement.naturalWidth < 50) return reject("Too small or not loaded");
+
                 const size = 32;
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
                 canvas.width = size + 1; canvas.height = size;
-                ctx.imageSmoothingEnabled = true;
-
+                
                 ctx.drawImage(imgElement, 0, 0, size + 1, size);
                 const imageData = ctx.getImageData(0, 0, size + 1, size).data;
-
+                
                 let hash = '';
                 for (let y = 0; y < size; y++) {
                     for (let x = 0; x < size; x++) {
@@ -83,7 +101,7 @@
                 resolve(binToHex(hash));
             } catch (e) { reject(e); }
         });
-    };
+    }
 
     function binToHex(bin) {
         let hex = '';
@@ -94,58 +112,138 @@
     }
 
     // ==============================================
-    // --- 3. Умный старт (Waiting Logic) ---
+    // --- 4. Логика Сканера (FIXED) ---
+    // ==============================================
+
+    async function scanCurrentFolder() {
+        console.log('🚀 Начинаем сканирование...');
+
+        // 1. ПРАВИЛЬНЫЙ СЕЛЕКТОР СКРОЛЛА
+        const scroller = document.querySelector('.file-block-scrolling');
+
+        if (!scroller) {
+            console.error('❌ ОШИБКА: Не найден .file-block-scrolling! Попробуй переключить вид папки в список и обратно в сетку.');
+            alert('Ошибка: Не найден скролл-контейнер Mega. Проверь консоль.');
+            return;
+        }
+
+        console.log('✅ Скролл-контейнер найден:', scroller);
+
+        // Сброс вверх
+        scroller.scrollTop = 0;
+        await new Promise(r => setTimeout(r, 1000));
+
+        let processedCount = 0;
+        const processedIDs = new Set();
+        let stuckCounter = 0;
+
+        while (true) {
+            // --- А. Поиск картинок ---
+            // Ищем теги IMG строго внутри блоков .fm-item-img
+            const images = scroller.querySelectorAll('.fm-item-img img');
+            
+            console.log(`👁️ Видимых картинок в блоке скролла: ${images.length}`);
+
+            for (let img of images) {
+                try {
+                    // 1. Пытаемся найти родительский контейнер файла, чтобы взять ID и Имя
+                    // Обычно ID висит на div, который выше на 1-3 уровня
+                    let fileContainer = img.closest('[id^="th_"]') || // ID начинается с th_
+                                        img.closest('[id^="b_"]') ||  // Иногда b_
+                                        img.closest('.mega-item-square') || 
+                                        img.closest('.block-view-file') ||
+                                        img.parentElement.parentElement; // Fallback
+
+                    let nodeId = fileContainer ? fileContainer.id : null;
+                    
+                    // Если ID нет в атрибуте id, ищем в dataset
+                    if (!nodeId && fileContainer && fileContainer.dataset.nodeId) {
+                        nodeId = fileContainer.dataset.nodeId;
+                    }
+
+                    // Если ID всё еще нет, берем src картинки как уникальный ключ (костыль, но рабочий)
+                    if (!nodeId) nodeId = img.src; 
+
+                    // Пропуск дублей
+                    if (processedIDs.has(nodeId)) continue;
+
+                    // Получение имени файла (ищем текстовый блок рядом)
+                    let name = 'Unknown';
+                    if (fileContainer) {
+                        const nameEl = fileContainer.querySelector('.block-view-file-name') || 
+                                       fileContainer.querySelector('.file-name') || 
+                                       fileContainer.innerText; // На крайний случай берем весь текст блока
+                        if (nameEl && typeof nameEl === 'string') name = nameEl.split('\n')[0]; // Берем первую строку
+                        else if (nameEl && nameEl.innerText) name = nameEl.innerText;
+                    }
+
+                    // Хеширование
+                    const hash = await getImageHash(img);
+                    
+                    await addFileToDB({
+                        nodeId: nodeId,
+                        name: name,
+                        path: document.title,
+                        hash: hash,
+                        timestamp: Date.now()
+                    });
+
+                    processedIDs.add(nodeId);
+                    processedCount++;
+
+                } catch (err) {
+                    // Ошибки часто бывают на иконках папок или мелких заглушках, это нормально
+                }
+            }
+
+            // --- Б. Скроллинг ---
+            const prevScrollTop = scroller.scrollTop;
+            scroller.scrollBy(0, SCROLL_STEP);
+            await new Promise(r => setTimeout(r, SCROLL_DELAY)); // Ждем подгрузку
+
+            // --- В. Проверка дна ---
+            if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) {
+                stuckCounter++;
+                if (stuckCounter >= 2) {
+                    console.log('🛑 Достигнут конец списка.');
+                    break;
+                }
+            } else {
+                stuckCounter = 0;
+            }
+        }
+
+        console.log(`🎉 Готово! Обработано файлов: ${processedCount}`);
+        console.log(`ℹ️ Всего в базе: ${(await window.checkDB()).length}`);
+    }
+
+    window.checkDB = async function() {
+        const db = await getDB();
+        const data = await db.getAll(STORE_NAME);
+        console.table(data.slice(-5)); // Показать последние 5
+        return data;
+    };
+
+    // ==============================================
+    // --- 5. Старт ---
     // ==============================================
 
     function waitForApp() {
         const checkInterval = setInterval(() => {
+            if (initDone) { clearInterval(checkInterval); return; }
 
-            // 1. Дополнительная проверка: если уже запустились, убиваем таймер и выходим
-            if (initDone) {
-                clearInterval(checkInterval);
-                return;
-            }
-
-            const isLoaded = document.querySelector('.fm-files-view') ||
-                             document.querySelector('.grid-view-resize-container') ||
-                             document.querySelector('.avatar-wrapper') ||
-                             document.querySelector('.main-file-manager');
-
-            if (isLoaded) {
-                // 2. Сразу ставим флаг, чтобы предотвратить повторный запуск
+            // Ждем именно контейнер скролла
+            const scroller = document.querySelector('.file-block-scrolling');
+            
+            if (scroller) {
                 initDone = true;
                 clearInterval(checkInterval);
-
-                console.log('🚀 Mega.nz загружена! Запуск тестов...');
-                runAutoTest();
+                createUI();
+                console.log('✅ Интерфейс найден. Кнопка добавлена.');
             }
         }, 1000);
     }
 
-    function runAutoTest() {
-        // Теперь эта функция вызовется строго ОДИН раз
-        const testId = 'AUTO_TEST_' + Date.now();
-
-        window.addFileToDB({
-            nodeId: testId,
-            name: 'system_check.jpg',
-            path: 'System/AutoCheck',
-            hash: 'TEST_HASH_DEADBEEF'
-        });
-
-        console.log('ℹ️ [INFO] Тестовая запись отправлена. Хеширование готово.');
-        console.log('ℹ️ Введи window.checkDB() для просмотра базы.');
-    }
-
-    // Запуск скрипта
     waitForApp();
 
-})();// ==UserScript==
-// @name        New script
-// @namespace   Violentmonkey Scripts
-// @match       *://example.org/*
-// @grant       none
-// @version     1.0
-// @author      Alex Tol
-// @description 27.11.2025, 19:25:44
-// ==/UserScript==
+})();
