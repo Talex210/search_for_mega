@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Indexer (Merged: Hash + SmartDB)
+// @name         Mega.nz Indexer (Merged: Hash + SmartDB) Fix infiniti console
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -13,13 +13,16 @@
     const DB_NAME = 'MegaSearchDB';
     const STORE_NAME = 'files';
 
+    // --- ПРЕДОХРАНИТЕЛЬ ---
+    // Эта переменная гарантирует, что скрипт запустится только 1 раз
+    let initDone = false;
+
     console.log('🔧 Скрипт инициализирован. Ожидание загрузки интерфейса Mega...');
 
     // ==============================================
     // --- 1. Логика Базы Данных (IndexedDB) ---
     // ==============================================
 
-    // Создаем/Открываем базу
     async function getDB() {
         return await idb.openDB(DB_NAME, 1, {
             upgrade(db) {
@@ -32,7 +35,6 @@
         });
     }
 
-    // Функция добавления файла (доступна в консоли)
     window.addFileToDB = async function(fileData) {
         try {
             const db = await getDB();
@@ -43,7 +45,6 @@
         }
     };
 
-    // Функция просмотра всей базы (доступна в консоли)
     window.checkDB = async function() {
         const db = await getDB();
         const allFiles = await db.getAll(STORE_NAME);
@@ -65,13 +66,11 @@
                 const ctx = canvas.getContext('2d');
                 canvas.width = size + 1; canvas.height = size;
                 ctx.imageSmoothingEnabled = true;
-                
-                // Рисуем картинку на маленький канвас
+
                 ctx.drawImage(imgElement, 0, 0, size + 1, size);
                 const imageData = ctx.getImageData(0, 0, size + 1, size).data;
-                
+
                 let hash = '';
-                // Вычисляем разницу яркости пикселей
                 for (let y = 0; y < size; y++) {
                     for (let x = 0; x < size; x++) {
                         const i = (y * (size + 1) + x) * 4;
@@ -86,7 +85,6 @@
         });
     };
 
-    // Вспомогательная функция перевода бинарного кода в HEX
     function binToHex(bin) {
         let hex = '';
         for (let i = 0; i < bin.length; i += 4) {
@@ -100,38 +98,54 @@
     // ==============================================
 
     function waitForApp() {
-        // Проверяем наличие интерфейса каждые 1000мс (1 сек)
         const checkInterval = setInterval(() => {
-            
-            const isLoaded = document.querySelector('.fm-files-view') || 
+
+            // 1. Дополнительная проверка: если уже запустились, убиваем таймер и выходим
+            if (initDone) {
+                clearInterval(checkInterval);
+                return;
+            }
+
+            const isLoaded = document.querySelector('.fm-files-view') ||
                              document.querySelector('.grid-view-resize-container') ||
                              document.querySelector('.avatar-wrapper') ||
                              document.querySelector('.main-file-manager');
 
             if (isLoaded) {
-                clearInterval(checkInterval); // Останавливаем таймер
+                // 2. Сразу ставим флаг, чтобы предотвратить повторный запуск
+                initDone = true;
+                clearInterval(checkInterval);
+
                 console.log('🚀 Mega.nz загружена! Запуск тестов...');
-                
-                // Запускаем авто-тест базы данных
                 runAutoTest();
             }
         }, 1000);
     }
 
     function runAutoTest() {
-        // Тестовая запись при каждом запуске с уникальным ID
+        // Теперь эта функция вызовется строго ОДИН раз
+        const testId = 'AUTO_TEST_' + Date.now();
+
         window.addFileToDB({
-            nodeId: 'AUTO_TEST_' + Date.now(), // Уникальный ID (Timestamp)
+            nodeId: testId,
             name: 'system_check.jpg',
             path: 'System/AutoCheck',
             hash: 'TEST_HASH_DEADBEEF'
         });
 
-        console.log('ℹ️ Хеширование готово. Для проверки хеша вручную используй window.getImageHash()');
-        console.log('ℹ️ Для просмотра базы введи: window.checkDB()');
+        console.log('ℹ️ [INFO] Тестовая запись отправлена. Хеширование готово.');
+        console.log('ℹ️ Введи window.checkDB() для просмотра базы.');
     }
 
     // Запуск скрипта
     waitForApp();
 
-})();
+})();// ==UserScript==
+// @name        New script
+// @namespace   Violentmonkey Scripts
+// @match       *://example.org/*
+// @grant       none
+// @version     1.0
+// @author      Alex Tol
+// @description 27.11.2025, 19:25:44
+// ==/UserScript==
