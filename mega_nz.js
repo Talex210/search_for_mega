@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Indexer (Step 4: The Crawler v2)
+// @name         Mega.nz Indexer (Step 4: The Crawler v3 - DB Fix)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -11,14 +11,15 @@
     'use strict';
 
     const DB_NAME = 'MegaSearchDB';
+    const DB_VERSION = 2; // 🔥 Подняли версию, чтобы обновить структуру
     const STORE_NAME = 'files';
     let initDone = false;
 
     // Настройки
-    const SCROLL_DELAY = 1000; // Чуть увеличили задержку для надежности
-    const SCROLL_STEP = 600;   
+    const SCROLL_DELAY = 1000;
+    const SCROLL_STEP = 600;
 
-    console.log('🔧 Скрипт (v2) загружен. Ждем интерфейс...');
+    console.log('🔧 Скрипт v3 (DB Fix) загружен.');
 
     // ==============================================
     // --- 1. UI ---
@@ -36,7 +37,7 @@
 
         btn.onclick = async () => {
             btn.disabled = true;
-            btn.innerText = '⏳ Working...';
+            btn.innerText = '⏳ Scanning...';
             btn.style.backgroundColor = '#555';
             await scanCurrentFolder();
             btn.innerText = '✅ Done';
@@ -49,15 +50,17 @@
     }
 
     // ==============================================
-    // --- 2. База Данных ---
+    // --- 2. База Данных (Улучшенная) ---
     // ==============================================
 
     async function getDB() {
-        return await idb.openDB(DB_NAME, 1, {
+        return await idb.openDB(DB_NAME, DB_VERSION, {
             upgrade(db) {
+                // Если старой таблицы нет - создаем
                 if (!db.objectStoreNames.contains(STORE_NAME)) {
                     const store = db.createObjectStore(STORE_NAME, { keyPath: 'nodeId' });
                     store.createIndex('hash', 'hash');
+                    console.log('✨ Создана таблица files');
                 }
             },
         });
@@ -66,8 +69,13 @@
     async function addFileToDB(fileData) {
         try {
             const db = await getDB();
+            // Используем put (создаст или обновит)
             await db.put(STORE_NAME, fileData);
-        } catch (e) { console.error('DB Error:', e); }
+            // Логируем успешную запись (можно закомментировать, если мешает)
+            console.log(`💾 [DB Saved] ${fileData.name} (ID: ${fileData.nodeId})`);
+        } catch (e) {
+            console.error('❌ Ошибка записи в БД:', e, fileData);
+        }
     }
 
     // ==============================================
@@ -77,8 +85,7 @@
     function getImageHash(imgElement) {
         return new Promise((resolve, reject) => {
             try {
-                // Игнорируем мелкие иконки и незагруженные
-                if (!imgElement || imgElement.naturalWidth < 50) return reject("Too small or not loaded");
+                if (!imgElement || imgElement.naturalWidth < 50) return reject("Too small");
 
                 const size = 32;
                 const canvas = document.createElement('canvas');
@@ -112,76 +119,67 @@
     }
 
     // ==============================================
-    // --- 4. Логика Сканера (FIXED) ---
+    // --- 4. Логика Сканера ---
     // ==============================================
 
     async function scanCurrentFolder() {
-        console.log('🚀 Начинаем сканирование...');
-
-        // 1. ПРАВИЛЬНЫЙ СЕЛЕКТОР СКРОЛЛА
+        console.log('🚀 Start Scanning...');
         const scroller = document.querySelector('.file-block-scrolling');
 
         if (!scroller) {
-            console.error('❌ ОШИБКА: Не найден .file-block-scrolling! Попробуй переключить вид папки в список и обратно в сетку.');
-            alert('Ошибка: Не найден скролл-контейнер Mega. Проверь консоль.');
+            alert('❌ Не найден скролл! Убедись, что ты в режиме сетки.');
             return;
         }
 
-        console.log('✅ Скролл-контейнер найден:', scroller);
-
-        // Сброс вверх
         scroller.scrollTop = 0;
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 800));
 
         let processedCount = 0;
         const processedIDs = new Set();
         let stuckCounter = 0;
 
         while (true) {
-            // --- А. Поиск картинок ---
-            // Ищем теги IMG строго внутри блоков .fm-item-img
+            // Ищем картинки внутри ячеек
             const images = scroller.querySelectorAll('.fm-item-img img');
             
-            console.log(`👁️ Видимых картинок в блоке скролла: ${images.length}`);
-
             for (let img of images) {
                 try {
-                    // 1. Пытаемся найти родительский контейнер файла, чтобы взять ID и Имя
-                    // Обычно ID висит на div, который выше на 1-3 уровня
-                    let fileContainer = img.closest('[id^="th_"]') || // ID начинается с th_
-                                        img.closest('[id^="b_"]') ||  // Иногда b_
-                                        img.closest('.mega-item-square') || 
-                                        img.closest('.block-view-file') ||
-                                        img.parentElement.parentElement; // Fallback
+                    // 1. Поиск контейнера с ID
+                    let fileContainer = img.closest('[id^="th_"]') || 
+                                        img.closest('[id^="b_"]') ||
+                                        img.closest('.mega-item-square') ||
+                                        img.parentElement.parentElement;
 
+                    // 2. Извлечение ID
                     let nodeId = fileContainer ? fileContainer.id : null;
-                    
-                    // Если ID нет в атрибуте id, ищем в dataset
-                    if (!nodeId && fileContainer && fileContainer.dataset.nodeId) {
-                        nodeId = fileContainer.dataset.nodeId;
+                    if (!nodeId && fileContainer && fileContainer.dataset.nodeId) nodeId = fileContainer.dataset.nodeId;
+
+                    // 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
+                    // Если ID не найден, генерируем временный уникальный ID, чтобы БД не ругалась
+                    if (!nodeId || nodeId === "") {
+                        const cleanSrc = img.src.substring(0, 50); // Берем часть ссылки
+                        nodeId = "generated_" + cleanSrc.replace(/[^a-zA-Z0-9]/g, '') + "_" + Date.now() + Math.random().toString(36).substring(7);
                     }
 
-                    // Если ID всё еще нет, берем src картинки как уникальный ключ (костыль, но рабочий)
-                    if (!nodeId) nodeId = img.src; 
-
-                    // Пропуск дублей
                     if (processedIDs.has(nodeId)) continue;
 
-                    // Получение имени файла (ищем текстовый блок рядом)
+                    // 3. Извлечение имени
                     let name = 'Unknown';
                     if (fileContainer) {
                         const nameEl = fileContainer.querySelector('.block-view-file-name') || 
                                        fileContainer.querySelector('.file-name') || 
-                                       fileContainer.innerText; // На крайний случай берем весь текст блока
-                        if (nameEl && typeof nameEl === 'string') name = nameEl.split('\n')[0]; // Берем первую строку
-                        else if (nameEl && nameEl.innerText) name = nameEl.innerText;
+                                       fileContainer.innerText;
+                        if (nameEl) {
+                             // Берем текст и чистим от переносов строк
+                             name = (typeof nameEl === 'string' ? nameEl : nameEl.innerText).split('\n')[0].trim();
+                        }
                     }
 
-                    // Хеширование
+                    // 4. Хешируем и сохраняем
                     const hash = await getImageHash(img);
                     
                     await addFileToDB({
-                        nodeId: nodeId,
+                        nodeId: nodeId, // Теперь это поле точно заполнено
                         name: name,
                         path: document.title,
                         hash: hash,
@@ -192,20 +190,19 @@
                     processedCount++;
 
                 } catch (err) {
-                    // Ошибки часто бывают на иконках папок или мелких заглушках, это нормально
+                    // Ошибки хеширования
                 }
             }
 
-            // --- Б. Скроллинг ---
+            // Скроллим
             const prevScrollTop = scroller.scrollTop;
             scroller.scrollBy(0, SCROLL_STEP);
-            await new Promise(r => setTimeout(r, SCROLL_DELAY)); // Ждем подгрузку
+            await new Promise(r => setTimeout(r, SCROLL_DELAY));
 
-            // --- В. Проверка дна ---
             if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) {
                 stuckCounter++;
                 if (stuckCounter >= 2) {
-                    console.log('🛑 Достигнут конец списка.');
+                    console.log('🛑 Конец списка.');
                     break;
                 }
             } else {
@@ -213,33 +210,28 @@
             }
         }
 
-        console.log(`🎉 Готово! Обработано файлов: ${processedCount}`);
-        console.log(`ℹ️ Всего в базе: ${(await window.checkDB()).length}`);
+        console.log(`🎉 Сканирование завершено! Обработано: ${processedCount}`);
+        const total = (await window.checkDB()).length;
+        console.log(`ℹ️ Итого в базе: ${total}`);
+        alert(`Готово! Собрано ${processedCount} файлов. Всего в базе: ${total}`);
     }
 
     window.checkDB = async function() {
         const db = await getDB();
         const data = await db.getAll(STORE_NAME);
-        console.table(data.slice(-5)); // Показать последние 5
+        console.table(data.slice(-5)); 
         return data;
     };
-
-    // ==============================================
-    // --- 5. Старт ---
-    // ==============================================
 
     function waitForApp() {
         const checkInterval = setInterval(() => {
             if (initDone) { clearInterval(checkInterval); return; }
-
-            // Ждем именно контейнер скролла
             const scroller = document.querySelector('.file-block-scrolling');
-            
             if (scroller) {
                 initDone = true;
                 clearInterval(checkInterval);
                 createUI();
-                console.log('✅ Интерфейс найден. Кнопка добавлена.');
+                console.log('✅ Ready to scan.');
             }
         }, 1000);
     }
