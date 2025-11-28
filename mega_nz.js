@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer (Spider+Crawler Unified v2.2 Skip Existing)
+// @name         Mega.nz Deep Indexer (Spider+Crawler Unified v2.3 Fast Folder Search)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,9 +8,9 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      2.2
+// @version      2.3
 // @author       Alex Tol
-// @description  Автоматический индексатор MEGA (Smart Scroll + Skip Existing Files)
+// @description  Автоматический индексатор MEGA (Smart Scroll + Skip Existing + Fast Folder Search)
 // ==/UserScript==
 
 (function() {
@@ -21,14 +21,21 @@
     let initDone = false;
 
     // === НАСТРОЙКИ ===
-    const SCROLL_DELAY = 1500;
-    const SCROLL_STEP = 600;
+    // 1. Для сканирования ФАЙЛОВ (нужно медленно для картинок)
+    const FILE_SCROLL_DELAY = 1500;
+    const FILE_SCROLL_STEP = 600;
+    
+    // 2. Для поиска ПАПОК (можно очень быстро)
+    const FOLDER_SEARCH_DELAY = 200;  // Было 1500, стало 200 (очень быстро)
+    const FOLDER_SEARCH_STEP = 1200;  // Прокрутка сразу на 2 экрана
+
+    // 3. Навигация
     const NAVIGATION_DELAY = 3000;
 
     let cancelRequested = false;
     const visitedFolderKeys = new Set();
 
-    console.log('🕷️📷 Mega.nz Deep Indexer v2.2 Loaded.');
+    console.log('🕷️📷 Mega.nz Deep Indexer v2.3 Loaded.');
 
     // ==============================================
     // --- 1. UI ---
@@ -84,7 +91,6 @@
     function updateButtonText(count) { if (uiBtn) uiBtn.innerText = `📷 Scan All Folders (DB: ${count})`; }
     function updateStatus(text) {
         if (statusDiv) { statusDiv.innerText = text; statusDiv.style.display = text ? 'block' : 'none'; }
-        // console.log(`📊 ${text}`); // Меньше спама в консоль
     }
 
     // ==============================================
@@ -97,11 +103,10 @@
     async function addFileToDB(fileData) {
         try { await GM.setValue(DB_PREFIX + fileData.nodeId, fileData); } catch (e) {}
     }
-    // Новая функция для проверки существования
     async function checkFileExists(nodeId) {
         try {
             const val = await GM.getValue(DB_PREFIX + nodeId);
-            return !!val; // Вернет true если файл есть
+            return !!val; 
         } catch (e) { return false; }
     }
 
@@ -145,7 +150,7 @@
     }
 
     // ==============================================
-    // --- 4. Сканнер текущей папки ---
+    // --- 4. Сканнер текущей папки (Файлы) ---
     // ==============================================
     async function scanCurrentFolder(label = "CURRENT") {
         console.log(`📸 [Scan: ${label}]`);
@@ -158,8 +163,8 @@
         await delay(1000);
 
         let processedCount = 0;
-        let skippedCount = 0; // Считаем пропущенные
-        const processedIDs = new Set(); // Локальный кэш для текущей прокрутки
+        let skippedCount = 0;
+        const processedIDs = new Set();
         let stuckCounter = 0;
 
         while (true) {
@@ -185,18 +190,15 @@
                         else nodeId = "src_" + img.src.substring(img.src.length - 20);
                     }
 
-                    // Если уже обработали в этом цикле скролла
                     if (processedIDs.has(nodeId)) continue;
 
-                    // === НОВОЕ: Проверка в БД ===
+                    // Проверка в БД (пропуск существующих)
                     const alreadyInDB = await checkFileExists(nodeId);
                     if (alreadyInDB) {
-                        // Если файл есть, просто пропускаем тяжелую обработку
                         skippedCount++;
                         processedIDs.add(nodeId);
                         continue;
                     }
-                    // ============================
 
                     const hash = await getImageHash(img);
                     await addFileToDB({ nodeId, name, path: getCurrentPath(), hash, timestamp: Date.now() });
@@ -208,9 +210,10 @@
 
             if (cancelRequested) break;
 
+            // Используем МЕДЛЕННЫЙ скролл для файлов
             const prevScrollTop = scroller.scrollTop;
-            scroller.scrollBy(0, SCROLL_STEP);
-            await delay(SCROLL_DELAY);
+            scroller.scrollBy(0, FILE_SCROLL_STEP);
+            await delay(FILE_SCROLL_DELAY);
 
             if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) {
                 stuckCounter++;
@@ -322,21 +325,24 @@
         if (scroller) {
             console.log(`${indent}⬆️ Сброс скролла для поиска папок...`);
             scroller.scrollTop = 0;
-            await delay(1500);
+            await delay(1000);
         }
 
-        // 3. Ищем подпапки (Smart Scroll)
+        // 3. Ищем подпапки (Smart Scroll - БЫСТРЫЙ)
         while (!cancelRequested) {
             const nextFolder = findNextUnvisitedFolder();
 
             if (!nextFolder) {
-                // Если папок нет, пробуем прокрутить вниз
+                // Если папок нет, пробуем прокрутить вниз БЫСТРО
                 if (scroller && (scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 50)) {
-                    console.log(`${indent}📜 Кручу вниз в поисках папок...`);
+                    // console.log(`${indent}📜 Кручу вниз (Fast Search)...`); // Меньше спама
                     const prevScroll = scroller.scrollTop;
-                    scroller.scrollBy(0, SCROLL_STEP);
-                    await delay(SCROLL_DELAY);
-                    if (Math.abs(scroller.scrollTop - prevScroll) < 5) break; // Конец скролла
+                    
+                    // ИСПОЛЬЗУЕМ БЫСТРЫЕ КОНСТАНТЫ
+                    scroller.scrollBy(0, FOLDER_SEARCH_STEP); 
+                    await delay(FOLDER_SEARCH_DELAY); 
+                    
+                    if (Math.abs(scroller.scrollTop - prevScroll) < 5) break; 
                     continue;
                 } else {
                     console.log(`${indent}✔️ Папок больше нет.`);
@@ -380,7 +386,7 @@
         cancelBtn.disabled = false; cancelBtn.style.opacity = '1';
 
         console.clear();
-        console.log('🚀 START DEEP INDEXING (Skip Existing Mode)');
+        console.log('🚀 START DEEP INDEXING (Fast Folder Search)');
 
         try {
             await deepScanCurrentFolder(0);
