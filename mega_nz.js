@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer (Spider+Crawler Unified v2.1 Smart Scroll)
+// @name         Mega.nz Deep Indexer (Spider+Crawler Unified v2.2 Skip Existing)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,9 +8,9 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      2.1
+// @version      2.2
 // @author       Alex Tol
-// @description  Автоматический индексатор MEGA (Grid+List, Smart Folder Scroll, Slow & Stable)
+// @description  Автоматический индексатор MEGA (Smart Scroll + Skip Existing Files)
 // ==/UserScript==
 
 (function() {
@@ -21,15 +21,14 @@
     let initDone = false;
 
     // === НАСТРОЙКИ ===
-    // Увеличили задержки для надежной прогрузки превью и DOM
-    const SCROLL_DELAY = 1500;      // Пауза после скролла (было 1000)
-    const SCROLL_STEP = 600;        // Шаг скролла
-    const NAVIGATION_DELAY = 3000;  // Пауза после входа/выхода из папки (было 3000)
+    const SCROLL_DELAY = 1500;
+    const SCROLL_STEP = 600;
+    const NAVIGATION_DELAY = 3000;
 
     let cancelRequested = false;
     const visitedFolderKeys = new Set();
 
-    console.log('🕷️📷 Mega.nz Deep Indexer v2.1 Loaded.');
+    console.log('🕷️📷 Mega.nz Deep Indexer v2.2 Loaded.');
 
     // ==============================================
     // --- 1. UI ---
@@ -85,7 +84,7 @@
     function updateButtonText(count) { if (uiBtn) uiBtn.innerText = `📷 Scan All Folders (DB: ${count})`; }
     function updateStatus(text) {
         if (statusDiv) { statusDiv.innerText = text; statusDiv.style.display = text ? 'block' : 'none'; }
-        console.log(`📊 ${text}`);
+        // console.log(`📊 ${text}`); // Меньше спама в консоль
     }
 
     // ==============================================
@@ -98,6 +97,14 @@
     async function addFileToDB(fileData) {
         try { await GM.setValue(DB_PREFIX + fileData.nodeId, fileData); } catch (e) {}
     }
+    // Новая функция для проверки существования
+    async function checkFileExists(nodeId) {
+        try {
+            const val = await GM.getValue(DB_PREFIX + nodeId);
+            return !!val; // Вернет true если файл есть
+        } catch (e) { return false; }
+    }
+
     unsafeWindow.checkDB = async function() {
         const keys = (await GM.listValues()).filter(k => k.startsWith(DB_PREFIX));
         console.log(`📊 Всего записей: ${keys.length}`);
@@ -147,12 +154,12 @@
         const scroller = document.querySelector('.file-block-scrolling');
         if (!scroller) { console.log('⚠️ Не найден скролл'); return 0; }
 
-        // Сброс в начало перед сканированием файлов
         scroller.scrollTop = 0;
         await delay(1000);
 
         let processedCount = 0;
-        const processedIDs = new Set();
+        let skippedCount = 0; // Считаем пропущенные
+        const processedIDs = new Set(); // Локальный кэш для текущей прокрутки
         let stuckCounter = 0;
 
         while (true) {
@@ -178,10 +185,22 @@
                         else nodeId = "src_" + img.src.substring(img.src.length - 20);
                     }
 
+                    // Если уже обработали в этом цикле скролла
                     if (processedIDs.has(nodeId)) continue;
+
+                    // === НОВОЕ: Проверка в БД ===
+                    const alreadyInDB = await checkFileExists(nodeId);
+                    if (alreadyInDB) {
+                        // Если файл есть, просто пропускаем тяжелую обработку
+                        skippedCount++;
+                        processedIDs.add(nodeId);
+                        continue;
+                    }
+                    // ============================
 
                     const hash = await getImageHash(img);
                     await addFileToDB({ nodeId, name, path: getCurrentPath(), hash, timestamp: Date.now() });
+                    
                     processedIDs.add(nodeId);
                     processedCount++;
                 } catch (err) {}
@@ -200,6 +219,8 @@
                 stuckCounter = 0;
             }
         }
+        
+        console.log(`📊 Итог папки: +${processedCount} новых, ${skippedCount} пропущено.`);
         return processedCount;
     }
 
@@ -216,7 +237,7 @@
     }
     function waitForContentChange() { return new Promise(r => setTimeout(r, NAVIGATION_DELAY)); }
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-
+    
     function getCurrentPath() {
         const crumbs = document.querySelectorAll('.fm-breadcrumbs');
         let path = '';
@@ -247,9 +268,7 @@
     function getAllFolderContainers() {
         const result = [];
         const seenNames = new Set();
-        // Универсальный поиск для List и Grid
         const allFolders = document.querySelectorAll('.mega-node.folder, tr.megaListItem .folder, .mega-item-square .folder');
-
         allFolders.forEach(node => {
             let container = node;
             if (!node.classList.contains('mega-node') && !node.classList.contains('megaListItem')) {
@@ -268,7 +287,6 @@
 
     function findNextUnvisitedFolder() {
         const folders = getAllFolderContainers();
-        // Мы не логируем каждый шаг, чтобы не засорять консоль при скролле
         for (const folder of folders) {
             const key = makeFolderKey(folder.name);
             if (!visitedFolderKeys.has(key)) {
@@ -287,7 +305,7 @@
     };
 
     // ==============================================
-    // --- 6. Рекурсивный обход (С ИСПРАВЛЕНИЕМ) ---
+    // --- 6. Рекурсивный обход ---
     // ==============================================
     async function deepScanCurrentFolder(depth = 0, maxDepth = 50) {
         if (cancelRequested || depth > maxDepth) return;
@@ -296,10 +314,10 @@
         const indent = '  '.repeat(depth);
         console.log(`${indent}📁 [Level ${depth}] ${currentPath}`);
 
-        // 1. Сканируем файлы (скролл уедет вниз)
+        // 1. Сканируем файлы
         await scanCurrentFolder(currentPath);
 
-        // 2. СБРОС СКРОЛЛА ВВЕРХ для поиска папок
+        // 2. Сброс скролла ВВЕРХ для поиска папок
         const scroller = document.querySelector('.file-block-scrolling');
         if (scroller) {
             console.log(`${indent}⬆️ Сброс скролла для поиска папок...`);
@@ -307,25 +325,18 @@
             await delay(1500);
         }
 
-        // 3. ИЩЕМ ПАПКИ (с умным скроллом)
+        // 3. Ищем подпапки (Smart Scroll)
         while (!cancelRequested) {
-            // Попытка найти папку на текущем экране
             const nextFolder = findNextUnvisitedFolder();
 
             if (!nextFolder) {
-                // Если папки нет, но мы еще не в самом низу, пробуем прокрутить
+                // Если папок нет, пробуем прокрутить вниз
                 if (scroller && (scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 50)) {
-                    console.log(`${indent}📜 Папок не видно, кручу вниз, вдруг они там...`);
+                    console.log(`${indent}📜 Кручу вниз в поисках папок...`);
                     const prevScroll = scroller.scrollTop;
                     scroller.scrollBy(0, SCROLL_STEP);
                     await delay(SCROLL_DELAY);
-
-                    // Если скролл не сдвинулся, значит реально конец
-                    if (Math.abs(scroller.scrollTop - prevScroll) < 5) {
-                        console.log(`${indent}✔️ Достигнут конец списка папок.`);
-                        break;
-                    }
-                    // Продолжаем цикл поиска после скролла
+                    if (Math.abs(scroller.scrollTop - prevScroll) < 5) break; // Конец скролла
                     continue;
                 } else {
                     console.log(`${indent}✔️ Папок больше нет.`);
@@ -333,25 +344,20 @@
                 }
             }
 
-            // Если нашли папку - заходим
             visitedFolderKeys.add(nextFolder.key);
             updateStatus(`Вход: ${nextFolder.name}`);
             console.log(`${indent}➡️ Вход: "${nextFolder.name}"`);
 
-            try {
-                nextFolder.element.style.outline = '3px solid #28a745';
-            } catch (e) {}
+            try { nextFolder.element.style.outline = '3px solid #28a745'; } catch (e) {}
 
             await delay(500);
             triggerDoubleClick(nextFolder.element);
             await waitForContentChange();
 
-            // Рекурсия
             await deepScanCurrentFolder(depth + 1, maxDepth);
 
             if (cancelRequested) break;
 
-            // Возврат
             console.log(`${indent}⬅️ Назад`);
             if (!goBack()) {
                 console.error(`${indent}❌ Ошибка возврата!`);
@@ -374,7 +380,7 @@
         cancelBtn.disabled = false; cancelBtn.style.opacity = '1';
 
         console.clear();
-        console.log('🚀 START DEEP INDEXING (Smart Scroll Mode)');
+        console.log('🚀 START DEEP INDEXING (Skip Existing Mode)');
 
         try {
             await deepScanCurrentFolder(0);
