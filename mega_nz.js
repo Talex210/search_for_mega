@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer (Spider+Crawler Unified v2.0 Final Fix Gemini)
+// @name         Mega.nz Deep Indexer (Spider+Crawler Unified v2.1 Smart Scroll)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,9 +8,9 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      2.0
+// @version      2.1
 // @author       Alex Tol
-// @description  Автоматический индексатор MEGA (Grid+List fix with Scroll Reset)
+// @description  Автоматический индексатор MEGA (Grid+List, Smart Folder Scroll, Slow & Stable)
 // ==/UserScript==
 
 (function() {
@@ -20,15 +20,16 @@
     let isRunning = false;
     let initDone = false;
 
-    // Настройки
-    const SCROLL_DELAY = 1000;
-    const SCROLL_STEP = 600;
-    const NAVIGATION_DELAY = 3500;
+    // === НАСТРОЙКИ ===
+    // Увеличили задержки для надежной прогрузки превью и DOM
+    const SCROLL_DELAY = 1500;      // Пауза после скролла (было 1000)
+    const SCROLL_STEP = 600;        // Шаг скролла
+    const NAVIGATION_DELAY = 3000;  // Пауза после входа/выхода из папки (было 3000)
 
     let cancelRequested = false;
     const visitedFolderKeys = new Set();
 
-    console.log('🕷️📷 Mega.nz Deep Indexer v2.0 Loaded.');
+    console.log('🕷️📷 Mega.nz Deep Indexer v2.1 Loaded.');
 
     // ==============================================
     // --- 1. UI ---
@@ -146,8 +147,9 @@
         const scroller = document.querySelector('.file-block-scrolling');
         if (!scroller) { console.log('⚠️ Не найден скролл'); return 0; }
 
+        // Сброс в начало перед сканированием файлов
         scroller.scrollTop = 0;
-        await delay(800);
+        await delay(1000);
 
         let processedCount = 0;
         const processedIDs = new Set();
@@ -227,7 +229,6 @@
 
     function getFolderName(elem) {
         if (!elem) return null;
-        // Важно: fm-item-name используется в Grid
         const selectors = ['.fm-item-name', '.tranfer-filetype-txt', '.block-view-file-name', '.file-name', '.name', 'span.name'];
         for (const sel of selectors) {
             const nameEl = elem.querySelector(sel);
@@ -243,23 +244,17 @@
         return `${getCurrentPath()}::${folderName}`;
     }
 
-    // === ИСПРАВЛЕННАЯ ФУНКЦИЯ ПОИСКА ПАПОК ===
     function getAllFolderContainers() {
         const result = [];
         const seenNames = new Set();
-
-        // Универсальный селектор для Grid и List в современном интерфейсе Mega
-        // Ищем элементы, которые имеют класс 'mega-node' и 'folder'
-        // Это работает и для <tr> (список) и для <a> (сетка)
+        // Универсальный поиск для List и Grid
         const allFolders = document.querySelectorAll('.mega-node.folder, tr.megaListItem .folder, .mega-item-square .folder');
 
         allFolders.forEach(node => {
-            // Если нашли иконку (.folder), берем родителя-контейнер
             let container = node;
             if (!node.classList.contains('mega-node') && !node.classList.contains('megaListItem')) {
                 container = node.closest('.mega-node') || node.closest('tr.megaListItem') || node.closest('.mega-item-square');
             }
-
             if (container) {
                 const name = getFolderName(container);
                 if (name && !seenNames.has(name)) {
@@ -268,16 +263,12 @@
                 }
             }
         });
-
         return result;
     }
 
     function findNextUnvisitedFolder() {
         const folders = getAllFolderContainers();
-        const currentPath = getCurrentPath();
-
-        console.log(`🔍 Путь: ${currentPath} | Папок: ${folders.length} | Посещено: ${visitedFolderKeys.size}`);
-
+        // Мы не логируем каждый шаг, чтобы не засорять консоль при скролле
         for (const folder of folders) {
             const key = makeFolderKey(folder.name);
             if (!visitedFolderKeys.has(key)) {
@@ -296,7 +287,7 @@
     };
 
     // ==============================================
-    // --- 6. Рекурсивный обход ---
+    // --- 6. Рекурсивный обход (С ИСПРАВЛЕНИЕМ) ---
     // ==============================================
     async function deepScanCurrentFolder(depth = 0, maxDepth = 50) {
         if (cancelRequested || depth > maxDepth) return;
@@ -305,27 +296,44 @@
         const indent = '  '.repeat(depth);
         console.log(`${indent}📁 [Level ${depth}] ${currentPath}`);
 
-        // 1. Сканируем файлы (это уведет скролл вниз)
+        // 1. Сканируем файлы (скролл уедет вниз)
         await scanCurrentFolder(currentPath);
 
-        // 2. !!! ВАЖНО !!! СБРАСЫВАЕМ СКРОЛЛ ВВЕРХ
-        // В Grid режиме MEGA удаляет верхние элементы из DOM, когда скролл внизу.
-        // Чтобы найти папки (которые обычно сверху), нужно вернуть скролл.
+        // 2. СБРОС СКРОЛЛА ВВЕРХ для поиска папок
         const scroller = document.querySelector('.file-block-scrolling');
         if (scroller) {
             console.log(`${indent}⬆️ Сброс скролла для поиска папок...`);
             scroller.scrollTop = 0;
-            await delay(1500); // Даем время на отрисовку DOM
+            await delay(1500);
         }
 
-        // 3. Ищем подпапки
+        // 3. ИЩЕМ ПАПКИ (с умным скроллом)
         while (!cancelRequested) {
+            // Попытка найти папку на текущем экране
             const nextFolder = findNextUnvisitedFolder();
+
             if (!nextFolder) {
-                console.log(`${indent}✔️ Папок больше нет.`);
-                break;
+                // Если папки нет, но мы еще не в самом низу, пробуем прокрутить
+                if (scroller && (scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 50)) {
+                    console.log(`${indent}📜 Папок не видно, кручу вниз, вдруг они там...`);
+                    const prevScroll = scroller.scrollTop;
+                    scroller.scrollBy(0, SCROLL_STEP);
+                    await delay(SCROLL_DELAY);
+
+                    // Если скролл не сдвинулся, значит реально конец
+                    if (Math.abs(scroller.scrollTop - prevScroll) < 5) {
+                        console.log(`${indent}✔️ Достигнут конец списка папок.`);
+                        break;
+                    }
+                    // Продолжаем цикл поиска после скролла
+                    continue;
+                } else {
+                    console.log(`${indent}✔️ Папок больше нет.`);
+                    break;
+                }
             }
 
+            // Если нашли папку - заходим
             visitedFolderKeys.add(nextFolder.key);
             updateStatus(`Вход: ${nextFolder.name}`);
             console.log(`${indent}➡️ Вход: "${nextFolder.name}"`);
@@ -338,10 +346,12 @@
             triggerDoubleClick(nextFolder.element);
             await waitForContentChange();
 
+            // Рекурсия
             await deepScanCurrentFolder(depth + 1, maxDepth);
 
             if (cancelRequested) break;
 
+            // Возврат
             console.log(`${indent}⬅️ Назад`);
             if (!goBack()) {
                 console.error(`${indent}❌ Ошибка возврата!`);
@@ -364,7 +374,7 @@
         cancelBtn.disabled = false; cancelBtn.style.opacity = '1';
 
         console.clear();
-        console.log('🚀 START DEEP INDEXING');
+        console.log('🚀 START DEEP INDEXING (Smart Scroll Mode)');
 
         try {
             await deepScanCurrentFolder(0);
@@ -390,12 +400,4 @@
         }, 1000);
     }
     init();
-})();// ==UserScript==
-// @name        New script
-// @namespace   Violentmonkey Scripts
-// @match       *://example.org/*
-// @grant       none
-// @version     1.0
-// @author      -
-// @description 28.11.2025, 23:46:29
-// ==/UserScript==
+})();
