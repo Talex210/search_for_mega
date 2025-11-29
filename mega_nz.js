@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer — Unified v8.0 (Web Worker)
+// @name         Mega.nz Deep Indexer — Unified v8.1 (UI Polish)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,9 +8,9 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      8.0
-// @author       Alex Tol (Workerized by Assistant)
-// @description  🕷️📷 Ultra-Fast Search using Web Worker technology. No freezing, max speed.
+// @version      8.1
+// @author       Alex Tol (UI Polish by Assistant)
+// @description  🕷️📷 Web Worker Search + Symmetrical UI + No Scrolling bugs.
 // ==/UserScript==
 
 (function() {
@@ -33,7 +33,7 @@
     let cancelRequested = false;
     const visitedFolderKeys = new Set();
 
-    // Matcher Settings (Passed to Worker)
+    // Matcher Settings
     const CONFIG = {
         GLOBAL_HASH_SIZE: 16,
         PATCH_GRID: 9,
@@ -44,7 +44,7 @@
     };
 
     // ==============================================
-    // --- WEB WORKER CODE (Run in parallel thread) ---
+    // --- WEB WORKER CODE ---
     // ==============================================
     const WORKER_CODE = `
     self.onmessage = function(e) {
@@ -57,7 +57,6 @@
             const qBlocks = query.blocks;
             const total = db.length;
 
-            // Helper: Hamming Distance
             function getDist(h1, h2) {
                 if(!h1 || !h2) return 256;
                 let d = 0;
@@ -68,16 +67,13 @@
                 return d;
             }
 
-            // Search Loop (Full Speed, No Delays)
             for (let i = 0; i < total; i++) {
                 const record = db[i];
                 if (!record.globalHash || !record.blocks) continue;
 
-                // 1. Global
                 const gDist = getDist(qGlobal, record.globalHash);
                 const gSim = 1 - (gDist / (config.GLOBAL_HASH_SIZE * config.GLOBAL_HASH_SIZE));
 
-                // 2. Local (Subset)
                 let strongMatches = 0;
                 const blocksA = qBlocks;
                 const blocksB = record.blocks;
@@ -95,7 +91,6 @@
                 }
                 const lSim = blocksA.length ? (strongMatches / blocksA.length) : 0;
 
-                // 3. Final Score
                 const finalScore = Math.max(gSim, lSim);
 
                 if (finalScore >= config.SIM_THRESHOLD) {
@@ -103,7 +98,6 @@
                     if (gSim > 0.85) matchType = 'Exact';
                     else if (lSim >= 0.70) matchType = 'Crop/Part';
 
-                    // Clone record to avoid transfer errors, add scores
                     results.push({
                         name: record.name,
                         path: record.path,
@@ -115,7 +109,6 @@
                     });
                 }
 
-                // Report progress every 1000 items
                 if (i % 1000 === 0) {
                     self.postMessage({ type: 'PROGRESS', loaded: i, total: total });
                 }
@@ -132,80 +125,106 @@
         if (searchWorker) return;
         const blob = new Blob([WORKER_CODE], { type: 'application/javascript' });
         searchWorker = new Worker(URL.createObjectURL(blob));
-        console.log('[Mega Unified] Web Worker Initialized.');
     }
 
     // ==============================================
-    // --- STYLES ---
+    // --- STYLES (FIXED LAYOUT) ---
     // ==============================================
     const style = document.createElement('style');
     style.textContent = `
         /* Modal Base */
         .mega-indexer-modal {
             position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            width: 650px; max-height: 85vh; background: #181818; color: #e0e0e0;
-            z-index: 10000; padding: 0; border-radius: 12px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.9); font-family: 'Segoe UI', sans-serif;
-            display: flex; flex-direction: column; border: 1px solid #333;
-            user-select: text !important; cursor: auto;
+            width: 600px; max-height: 85vh;
+            background: #181818; color: #e0e0e0; z-index: 10000; padding: 0;
+            border-radius: 12px; box-shadow: 0 25px 80px rgba(0,0,0,0.95);
+            font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column;
+            border: 1px solid #333; user-select: text !important; cursor: auto;
+            box-sizing: border-box;
         }
-        .mega-indexer-header { padding: 15px 20px; border-bottom: 1px solid #2a2a2a; display: flex; justify-content: space-between; align-items: center; background: #202020; border-radius: 12px 12px 0 0; user-select: none; }
+        .mega-indexer-header {
+            padding: 15px 20px; border-bottom: 1px solid #2a2a2a;
+            display: flex; justify-content: space-between; align-items: center;
+            background: #202020; border-radius: 12px 12px 0 0; user-select: none;
+        }
         .mega-indexer-title { font-size: 18px; font-weight: 600; margin: 0; color: #fff; }
-        .mega-indexer-close { cursor: pointer; font-size: 20px; color: #888; width: 30px; height: 30px; text-align: center; line-height: 30px; }
+        .mega-indexer-close { cursor: pointer; font-size: 20px; color: #888; width: 30px; height: 30px; text-align: center; line-height: 30px; transition: 0.2s; }
         .mega-indexer-close:hover { color: #fff; background: #c0392b; border-radius: 50%; }
 
-        /* CSS FIX: Overflow & Sizing */
+        /* Body & Scroll Fixes */
         .mega-indexer-body {
             padding: 20px;
             overflow-y: auto;
-            overflow-x: hidden; /* FIX Horizontal Scroll */
+            overflow-x: hidden;
             flex-grow: 1;
             scrollbar-width: thin;
             scrollbar-color: #444 #181818;
-            box-sizing: border-box; /* FIX Padding calculation */
+            display: flex;
+            flex-direction: column;
+            gap: 15px; /* Uniform spacing between elements */
+            box-sizing: border-box;
         }
 
-        /* Progress Bar */
-        .progress-container { width: 100%; background-color: #333; border-radius: 6px; margin: 15px 0; height: 20px; overflow: hidden; display: none; position: relative; }
+        /* Progress Bar (Centered) */
+        .progress-container {
+            width: 100%; background-color: #333; border-radius: 10px;
+            height: 24px; overflow: hidden; display: none; position: relative;
+            box-sizing: border-box;
+        }
         .progress-bar { height: 100%; background-color: #28a745; width: 0%; transition: width 0.1s; }
-        .progress-text { position: absolute; width: 100%; text-align: center; top: 0; line-height: 20px; font-size: 11px; color: #fff; text-shadow: 0 1px 2px #000; }
+        .progress-text {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 11px; font-weight: bold; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+        }
 
-        /* Inputs & Buttons */
-        .mega-file-input-label { display: block; padding: 25px; background: #222; border: 2px dashed #444; text-align: center; border-radius: 8px; cursor: pointer; transition: 0.2s; color: #aaa; margin-bottom: 10px; width: 100%; box-sizing: border-box; }
+        /* Inputs */
+        .mega-file-input-label {
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            padding: 30px; background: #222; border: 2px dashed #444;
+            border-radius: 8px; cursor: pointer; transition: 0.2s; color: #aaa;
+            width: 100%; box-sizing: border-box;
+        }
         .mega-file-input-label:hover, .mega-file-input-label.drag-over { border-color: #8e44ad; color: #fff; background: #292929; }
 
+        /* Buttons */
         .mega-btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; color: white; transition: 0.2s; display: inline-block; margin-right: 10px; }
         .btn-primary { background: #007bff; } .btn-primary:hover { background: #0056b3; }
         .btn-success { background: #28a745; } .btn-success:hover { background: #218838; }
         .btn-danger  { background: #dc3545; } .btn-danger:hover  { background: #c82333; }
 
-        /* Search Results */
-        .search-result-item { background: #222; padding: 10px; margin-bottom: 8px; border-radius: 6px; border: 1px solid #333; display: flex; gap: 12px; align-items: flex-start; width: 100%; box-sizing: border-box; }
+        /* Results (Symmetrical) */
+        .search-result-item {
+            background: #222; padding: 12px; border-radius: 8px;
+            border: 1px solid #333; display: flex; gap: 15px; align-items: flex-start;
+            width: 100%; box-sizing: border-box;
+        }
         .search-result-info { flex-grow: 1; overflow: hidden; }
         .search-result-name { font-size: 14px; color: #fff; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
-        .search-result-path { font-size: 11px; color: #888; margin-bottom: 6px; font-family: monospace; word-break: break-all; }
+        .search-result-path { font-size: 11px; color: #888; margin-bottom: 8px; font-family: monospace; word-break: break-all; }
         .search-result-meta { font-size: 11px; display: flex; gap: 10px; align-items: center; user-select: none; flex-wrap: wrap; }
 
-        .sim-badge { padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 10px; text-transform: uppercase; }
+        .sim-badge { padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; text-transform: uppercase; }
         .sim-exact { background: rgba(46, 204, 113, 0.15); color: #2ecc71; border: 1px solid #2ecc71; }
         .sim-crop  { background: rgba(52, 152, 219, 0.15); color: #3498db; border: 1px solid #3498db; }
         .sim-high  { background: rgba(230, 126, 34, 0.15); color: #e67e22; border: 1px solid #e67e22; }
 
-        .btn-find-mega { background: #2980b9; color: white; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: auto; }
+        .btn-find-mega { background: #2980b9; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: auto; }
+        .btn-find-mega:hover { background: #3498db; }
 
-        /* Control Bar */
+        /* Controls */
         #mega-indexer-controls { position: fixed; bottom: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: row; gap: 10px; align-items: center; pointer-events: none; }
         #mega-indexer-controls button { pointer-events: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); font-family: 'Segoe UI', sans-serif; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px; padding: 12px 18px; transition: transform 0.1s; }
         #mega-indexer-controls button:active { transform: scale(0.96); }
 
         /* DB Manager */
-        .db-stat-box { background: #252525; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #333; text-align: center; }
+        .db-stat-box { background: #252525; padding: 15px; border-radius: 8px; border: 1px solid #333; text-align: center; width: 100%; box-sizing: border-box; }
         .db-stat-number { font-size: 24px; color: #2ecc71; font-weight: bold; }
-        .db-actions { display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; }
-        .import-status { margin-top: 15px; color: #aaa; font-size: 12px; text-align: center; }
+        .db-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; width: 100%; }
+        .import-status { margin-top: 10px; color: #aaa; font-size: 12px; text-align: center; }
     `;
     document.head.appendChild(style);
-    console.log('[Mega Unified] v8.0 loaded. Web Worker ready.');
+    console.log('[Mega Unified] v8.1 loaded. UI Polished.');
 
     // ==============================================
     // --- UI ELEMENTS ---
@@ -262,7 +281,7 @@
             document.body.appendChild(statusDiv);
         }
 
-        initWorker(); // Initialize worker on load
+        initWorker();
     }
 
     // ========== PROGRESS HELPERS ==========
@@ -282,8 +301,6 @@
         const dbKeys = keys.filter(k => k.startsWith(DB_PREFIX));
         const total = dbKeys.length;
         RAM_DB = [];
-
-        // Fetch in larger batches since we are just loading to memory
         const batchSize = 500;
         for (let i = 0; i < total; i += batchSize) {
             if (cancelRequested) break;
@@ -298,7 +315,6 @@
     function performWorkerSearch(queryDesc) {
         return new Promise((resolve, reject) => {
             if (!searchWorker) initWorker();
-
             searchWorker.onmessage = function(e) {
                 const { type, results, loaded, total } = e.data;
                 if (type === 'PROGRESS') {
@@ -307,19 +323,8 @@
                     resolve(results);
                 }
             };
-
-            searchWorker.onerror = function(e) {
-                reject(e.message);
-            };
-
-            searchWorker.postMessage({
-                type: 'SEARCH',
-                payload: {
-                    db: RAM_DB,
-                    query: queryDesc,
-                    config: CONFIG
-                }
-            });
+            searchWorker.onerror = function(e) { reject(e.message); };
+            searchWorker.postMessage({ type: 'SEARCH', payload: { db: RAM_DB, query: queryDesc, config: CONFIG } });
         });
     }
 
@@ -433,19 +438,24 @@
                     <div class="progress-bar" id="megaProgressFill"></div>
                     <div class="progress-text" id="megaProgressText">0%</div>
                 </div>
+
                 <label class="mega-file-input-label" id="megaDropZone">
+                    <div style="font-size:24px; margin-bottom:10px">📂</div>
                     <input type="file" id="megaSearchInput" accept="image/*" style="display:none">
-                    <span>📁 Click or <b>Drag & Drop</b> Image</span>
+                    <span>Click to Upload or <b>Drag & Drop</b> Image</span>
                 </label>
-                <div id="megaSearchPreview" style="text-align: center; margin-bottom: 20px; display:none;">
-                    <img id="previewImg" style="max-width: 150px; max-height: 150px; border-radius: 6px; border: 2px solid #444;">
+
+                <div id="megaSearchPreview" style="text-align: center; display:none;">
+                    <img id="previewImg" style="max-width: 200px; max-height: 150px; border-radius: 6px; border: 2px solid #444; display:block; margin:0 auto;">
                 </div>
+
                 <div id="megaSearchResults">
                     <div style="text-align:center; color: #666; padding: 20px;">Upload an image to search...</div>
                 </div>
             </div>
         `;
         document.body.appendChild(searchPanel);
+
         progressContainer = document.getElementById('megaProgressBar');
         progressBar = document.getElementById('megaProgressFill');
         progressText = document.getElementById('megaProgressText');
@@ -500,7 +510,6 @@
                 hideProgress(); return;
             }
 
-            // RUN WORKER
             const matches = await performWorkerSearch(queryDesc);
             hideProgress();
 
@@ -557,7 +566,7 @@
     }
 
     // ==============================================
-    // --- HASHING (Main Thread) ---
+    // --- HASHING ---
     // ==============================================
     async function getImageDescriptor(img) {
         const w = img.naturalWidth || img.width;
@@ -612,12 +621,7 @@
     async function checkFileExists(nodeId) { try { return !!(await GM.getValue(DB_PREFIX + nodeId)); } catch (e) { return false; } }
     function escapeHtml(str) { return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-    function getCurrentPath() {
-        let path = '';
-        document.querySelectorAll('.fm-breadcrumbs').forEach(c => { path += '/' + (c.innerText || '').trim(); });
-        return path || '/root';
-    }
+    function getCurrentPath() { let path = ''; document.querySelectorAll('.fm-breadcrumbs').forEach(c => { path += '/' + (c.innerText || '').trim(); }); return path || '/root'; }
 
     async function scanCurrentFolder() {
         const scroller = document.querySelector('.file-block-scrolling');
@@ -646,11 +650,9 @@
                     if (!img.complete || img.naturalWidth === 0) continue;
                     const desc = await getImageDescriptor(img);
                     if (!desc) { processedIDs.add(nodeId); continue; }
-
                     const record = { nodeId, name, path: getCurrentPath(), globalHash: desc.globalHash, blocks: desc.blocks, timestamp: Date.now() };
                     await addFileToDB(record);
                     if (RAM_DB) RAM_DB.push(record);
-
                     processedIDs.add(nodeId);
                     processedCount++;
                     updateStatus(`Indexed: ${processedCount}`);
@@ -660,10 +662,7 @@
             const prevScrollTop = scroller.scrollTop;
             scroller.scrollBy(0, FILE_SCROLL_STEP);
             await delay(FILE_SCROLL_DELAY);
-            if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) {
-                stuckCounter++;
-                if (stuckCounter >= 2) break;
-            } else { stuckCounter = 0; }
+            if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) { stuckCounter++; if (stuckCounter >= 2) break; } else { stuckCounter = 0; }
         }
         return processedCount;
     }
