@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer (Spider+Crawler Unified v2.6 Dark UI + DragDrop + Fixes)
+// @name         Mega.nz Deep Indexer (Spider+Crawler Unified v2.7 Dark UI + DragDrop + Fixes)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,7 +8,7 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      2.6
+// @version      2.7
 // @author       Alex Tol
 // @description  Индексатор MEGA + Поиск (Drag&Drop Fix, Text Select Fix, Search Fix)
 // ==/UserScript==
@@ -99,7 +99,7 @@
     `;
     document.head.appendChild(style);
 
-    console.log('🕷️📷 Mega.nz Deep Indexer v2.6 Loaded.');
+    console.log('🕷️📷 Mega.nz Deep Indexer v2.7 Loaded.');
 
     // ==============================================
     // --- 1. UI ---
@@ -128,7 +128,7 @@
             searchBtn = document.createElement('button');
             searchBtn.innerText = '🔍 Search';
             searchBtn.style.cssText = `
-                position: fixed; bottom: 20px; right: 255px; z-index: 9999;
+                position: fixed; bottom: 20px; right: 265px; z-index: 9999;
                 padding: 12px 18px; background-color: #007bff; color: white;
                 border: none; border-radius: 8px; cursor: pointer; font-weight: bold;
                 font-size: 14px; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
