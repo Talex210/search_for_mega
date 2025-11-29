@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer — Unified v5.4 (High Accuracy)
+// @name         Mega.nz Deep Indexer — Unified v5.5 (Flex UI)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,19 +8,19 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      5.4
+// @version      5.5
 // @author       Alex Tol (Fixed by Assistant)
-// @description  🕷️📷 v5.1 Crawler + v5.2 Matcher. Only shows matches > 70%.
+// @description  🕷️📷 v5.1 Crawler + v5.2 Matcher. Flexbox UI for buttons. Matches > 70%.
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // НОВАЯ БД (Можно оставить старую от v5.3, они совместимы)
+    // НОВАЯ БД
     const DB_PREFIX = 'MegaSearchDB_v5_Hybrid:';
     let isRunning = false;
 
-    // === НАСТРОЙКИ СКОЛЛИНГА (Из v5.1 - Надежные) ===
+    // === НАСТРОЙКИ СКОЛЛИНГА ===
     const FILE_SCROLL_DELAY = 1500;
     const FILE_SCROLL_STEP = 600;
     const FOLDER_SEARCH_DELAY = 200;
@@ -29,17 +29,12 @@
     let cancelRequested = false;
     const visitedFolderKeys = new Set();
 
-    // === НАСТРОЙКИ АЛГОРИТМА ПОИСКА (Из v5.2 - Точные) ===
-    const GLOBAL_HASH_SIZE = 16;  // 16x16
-    const PATCH_GRID = 9;         // 9x9 блоков
-    const PATCH_HASH_SIZE = 8;    // 8x8
-
-    // Строгий порог для блоков
+    // === НАСТРОЙКИ АЛГОРИТМА ПОИСКА ===
+    const GLOBAL_HASH_SIZE = 16;
+    const PATCH_GRID = 9;
+    const PATCH_HASH_SIZE = 8;
     const PATCH_GOOD_DIST = 10;
-
-    // !!! ИЗМЕНЕНИЕ: Показываем только если совпадение >= 70% !!!
     const SIM_THRESHOLD = 0.70;
-
     const MAX_RESULTS = 20;
 
     // ==============================================
@@ -71,10 +66,34 @@
         .btn-find-mega { background: #2980b9; color: white; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: auto; }
         .btn-find-mega:hover { background: #3498db; }
 
-        .debug-info { font-size: 10px; color: #666; margin-top: 4px; }
+        /* UI Container Styles */
+        #mega-indexer-controls {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: row;
+            gap: 10px;
+            align-items: center;
+            pointer-events: none; /* Allows clicking through gaps */
+        }
+        #mega-indexer-controls button {
+            pointer-events: auto; /* Re-enable clicks on buttons */
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            font-family: 'Segoe UI', sans-serif;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            padding: 12px 18px;
+            transition: transform 0.1s;
+        }
+        #mega-indexer-controls button:active { transform: scale(0.96); }
     `;
     document.head.appendChild(style);
-    console.log('[Mega Unified] v5.4 loaded. Threshold set to 70%.');
+    console.log('[Mega Unified] v5.5 loaded. Flexbox UI.');
 
     // ==============================================
     // --- UI ELEMENTS ---
@@ -84,33 +103,61 @@
     let cancelBtn = null;
     let statusDiv = null;
     let searchPanel = null;
+    let controlsContainer = null;
 
     function createUI(initialCount) {
-        if (!uiBtn) {
-            uiBtn = document.createElement('button');
-            updateButtonText(initialCount);
-            uiBtn.style.cssText = `position: fixed; bottom: 20px; right: 20px; z-index: 9999; padding: 12px 18px; background-color: #6f42c1; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); font-family: 'Segoe UI', sans-serif;`;
-            uiBtn.onclick = startDeepIndexing;
-            document.body.appendChild(uiBtn);
+        // 1. Create Container
+        if (!controlsContainer) {
+            controlsContainer = document.createElement('div');
+            controlsContainer.id = 'mega-indexer-controls';
+            document.body.appendChild(controlsContainer);
         }
+
+        // 2. Create Search Button
         if (!searchBtn) {
             searchBtn = document.createElement('button');
             searchBtn.innerText = '🔍 Search';
-            searchBtn.style.cssText = `position: fixed; bottom: 20px; right: 220px; z-index: 9999; padding: 12px 18px; background-color: #007bff; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); font-family: 'Segoe UI', sans-serif;`;
+            searchBtn.style.backgroundColor = '#007bff';
+            searchBtn.style.color = 'white';
             searchBtn.onclick = toggleSearchUI;
-            document.body.appendChild(searchBtn);
+            controlsContainer.appendChild(searchBtn);
         }
+
+        // 3. Create Scan Button
+        if (!uiBtn) {
+            uiBtn = document.createElement('button');
+            updateButtonText(initialCount);
+            uiBtn.style.backgroundColor = '#6f42c1';
+            uiBtn.style.color = 'white';
+            uiBtn.onclick = startDeepIndexing;
+            controlsContainer.appendChild(uiBtn);
+        }
+
+        // 4. Cancel Button (Separate, absolute positioned above)
         if (!cancelBtn) {
             cancelBtn = document.createElement('button');
             cancelBtn.innerText = '✖ Stop';
-            cancelBtn.style.cssText = `position: fixed; bottom: 75px; right: 20px; z-index: 9999; padding: 6px 12px; background-color: #d9534f; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 11px; box-shadow: 0 2px 5px rgba(0,0,0,0.4); opacity: 0.5;`;
+            cancelBtn.style.cssText = `
+                position: fixed; bottom: 75px; right: 20px; z-index: 9999;
+                padding: 6px 12px; background-color: #d9534f; color: white;
+                border: none; border-radius: 6px; cursor: pointer;
+                font-weight: bold; font-size: 11px; box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+                opacity: 0.5;
+            `;
             cancelBtn.disabled = true;
             cancelBtn.onclick = () => { if (!isRunning || cancelRequested) return; cancelRequested = true; cancelBtn.innerText = 'Stopping...'; };
             document.body.appendChild(cancelBtn);
         }
+
+        // 5. Status Div
         if (!statusDiv) {
             statusDiv = document.createElement('div');
-            statusDiv.style.cssText = `position: fixed; bottom: 110px; right: 20px; z-index: 9999; padding: 5px 10px; background-color: rgba(0,0,0,0.8); color: #0f0; border-radius: 4px; font-size: 10px; font-family: monospace; max-width: 250px; display: none; pointer-events: none;`;
+            statusDiv.style.cssText = `
+                position: fixed; bottom: 110px; right: 20px; z-index: 9999;
+                padding: 5px 10px; background-color: rgba(0,0,0,0.8); color: #0f0;
+                border-radius: 4px; font-size: 10px; font-family: monospace;
+                max-width: 250px; display: none; pointer-events: none;
+            `;
             document.body.appendChild(statusDiv);
         }
     }
@@ -246,7 +293,7 @@
     }
 
     // ==============================================
-    // --- MATCHING ENGINE (v5.4 Threshold Fix) ---
+    // --- MATCHING ENGINE ---
     // ==============================================
     async function searchInDB(queryDesc) {
         const keys = await GM.listValues();
@@ -259,17 +306,12 @@
             const record = await GM.getValue(key);
             if (!record || !record.globalHash || !record.blocks) continue;
 
-            // 1. Глобальное сходство
             const globalDist = calculateHammingDistance(qGlobal, record.globalHash);
             const globalSim = 1 - (globalDist / (GLOBAL_HASH_SIZE * GLOBAL_HASH_SIZE));
 
-            // 2. Локальное сходство (SUBSET)
             const localSim = calculateSubsetScore(qBlocks, record.blocks);
-
-            // 3. Финальный скор
             const finalScore = Math.max(globalSim, localSim);
 
-            // ФИЛЬТР: Если меньше 70%, сразу пропускаем
             if (finalScore < SIM_THRESHOLD) continue;
 
             let matchType = 'High';
@@ -282,7 +324,6 @@
         return results.slice(0, MAX_RESULTS);
     }
 
-    // Проверяем, содержится ли А внутри Б (для кропов)
     function calculateSubsetScore(blocksA, blocksB) {
         if (!blocksA.length || !blocksB.length) return 0;
         let strongMatches = 0;
@@ -368,7 +409,7 @@
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
     // ==============================================
-    // --- CRAWLER CORE (v5.1 Logic) ---
+    // --- CRAWLER CORE ---
     // ==============================================
     function getCurrentPath() {
         let path = '';
