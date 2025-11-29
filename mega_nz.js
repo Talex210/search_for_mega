@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer — Unified v5.3 (Hybrid Fix Work!!!)
+// @name         Mega.nz Deep Indexer — Unified v5.4 (High Accuracy)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,15 +8,15 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      5.3
+// @version      5.4
 // @author       Alex Tol (Fixed by Assistant)
-// @description  🕷️📷 Best of both worlds: v5.1 Crawler (Reliable) + v5.2 Matcher (Accurate).
+// @description  🕷️📷 v5.1 Crawler + v5.2 Matcher. Only shows matches > 70%.
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // НОВАЯ БД (v5.2 logic requires clean DB for best results)
+    // НОВАЯ БД (Можно оставить старую от v5.3, они совместимы)
     const DB_PREFIX = 'MegaSearchDB_v5_Hybrid:';
     let isRunning = false;
 
@@ -34,14 +34,16 @@
     const PATCH_GRID = 9;         // 9x9 блоков
     const PATCH_HASH_SIZE = 8;    // 8x8
 
-    // Строгий порог для блоков (убирает ложные срабатывания)
+    // Строгий порог для блоков
     const PATCH_GOOD_DIST = 10;
-    // Порог похожести (35%)
-    const SIM_THRESHOLD = 0.35;
+
+    // !!! ИЗМЕНЕНИЕ: Показываем только если совпадение >= 70% !!!
+    const SIM_THRESHOLD = 0.70;
+
     const MAX_RESULTS = 20;
 
     // ==============================================
-    // --- STYLES (v5.2 Clean UI) ---
+    // --- STYLES ---
     // ==============================================
     const style = document.createElement('style');
     style.textContent = `
@@ -64,7 +66,7 @@
         .sim-badge { padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 10px; text-transform: uppercase; }
         .sim-exact { background: rgba(46, 204, 113, 0.15); color: #2ecc71; border: 1px solid #2ecc71; }
         .sim-crop  { background: rgba(52, 152, 219, 0.15); color: #3498db; border: 1px solid #3498db; }
-        .sim-weak  { background: rgba(230, 126, 34, 0.15); color: #e67e22; border: 1px solid #e67e22; }
+        .sim-high  { background: rgba(230, 126, 34, 0.15); color: #e67e22; border: 1px solid #e67e22; }
 
         .btn-find-mega { background: #2980b9; color: white; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: auto; }
         .btn-find-mega:hover { background: #3498db; }
@@ -72,7 +74,7 @@
         .debug-info { font-size: 10px; color: #666; margin-top: 4px; }
     `;
     document.head.appendChild(style);
-    console.log('[Mega Unified] v5.3 loaded. Logic: Crawler(v5.1) + Matcher(v5.2).');
+    console.log('[Mega Unified] v5.4 loaded. Threshold set to 70%.');
 
     // ==============================================
     // --- UI ELEMENTS ---
@@ -124,7 +126,7 @@
         ['mousedown', 'mouseup', 'click'].forEach(ev => { searchPanel.addEventListener(ev, e => e.stopPropagation()); });
         searchPanel.innerHTML = `
             <div class="mega-indexer-header">
-                <h3 class="mega-indexer-title">📷 Smart Image Search (Crops & Exact)</h3>
+                <h3 class="mega-indexer-title">📷 Smart Image Search (>70%)</h3>
                 <div class="mega-indexer-close" id="btnSearchClose">✖</div>
             </div>
             <div class="mega-indexer-body">
@@ -189,7 +191,7 @@
             const matches = await searchInDB(queryDesc);
 
             if (!matches.length) {
-                resultsDiv.innerHTML = `<div style="text-align:center; padding:20px; color:#d9534f;">❌ No matches found.<br><span style="font-size:11px; color:#888;">DB: ${await getDBCount()} items.</span></div>`;
+                resultsDiv.innerHTML = `<div style="text-align:center; padding:20px; color:#d9534f;">❌ No matches > 70%.<br><span style="font-size:11px; color:#888;">DB: ${await getDBCount()} items.</span></div>`;
             } else {
                 let html = '';
                 matches.forEach(m => {
@@ -198,7 +200,7 @@
                     let badge = '';
                     if (m.matchType === 'Exact') badge = `<span class="sim-badge sim-exact">Exact: ${similarity}%</span>`;
                     else if (m.matchType === 'Crop/Part') badge = `<span class="sim-badge sim-crop">Inside: ${similarity}%</span>`;
-                    else badge = `<span class="sim-badge sim-weak">Weak: ${similarity}%</span>`;
+                    else badge = `<span class="sim-badge sim-high">High: ${similarity}%</span>`;
 
                     html += `
                         <div class="search-result-item">
@@ -244,7 +246,7 @@
     }
 
     // ==============================================
-    // --- MATCHING ENGINE (FIXED v5.2) ---
+    // --- MATCHING ENGINE (v5.4 Threshold Fix) ---
     // ==============================================
     async function searchInDB(queryDesc) {
         const keys = await GM.listValues();
@@ -261,20 +263,20 @@
             const globalDist = calculateHammingDistance(qGlobal, record.globalHash);
             const globalSim = 1 - (globalDist / (GLOBAL_HASH_SIZE * GLOBAL_HASH_SIZE));
 
-            // 2. Локальное сходство (SUBSET) - Исправление для обрезанных изображений
+            // 2. Локальное сходство (SUBSET)
             const localSim = calculateSubsetScore(qBlocks, record.blocks);
 
-            // 3. Финальный скор - берем максимум, а не среднее
+            // 3. Финальный скор
             const finalScore = Math.max(globalSim, localSim);
-            let matchType = 'Weak';
 
+            // ФИЛЬТР: Если меньше 70%, сразу пропускаем
+            if (finalScore < SIM_THRESHOLD) continue;
+
+            let matchType = 'High';
             if (globalSim > 0.85) matchType = 'Exact';
-            else if (localSim > 0.60) matchType = 'Crop/Part'; // Высокая вероятность кропа
-            else if (finalScore > 0.50) matchType = 'Similiar';
+            else if (localSim >= 0.70) matchType = 'Crop/Part';
 
-            if (finalScore >= SIM_THRESHOLD) {
-                results.push({ ...record, globalSim, localSim, finalScore, matchType });
-            }
+            results.push({ ...record, globalSim, localSim, finalScore, matchType });
         }
         results.sort((a, b) => b.finalScore - a.finalScore);
         return results.slice(0, MAX_RESULTS);
@@ -307,7 +309,7 @@
     }
 
     // ==============================================
-    // --- HASHING (Improved v5.2) ---
+    // --- HASHING ---
     // ==============================================
     async function getImageDescriptor(img) {
         const w = img.naturalWidth || img.width;
@@ -366,9 +368,8 @@
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
     // ==============================================
-    // --- CRAWLER CORE (RESTORED FROM v5.1) ---
+    // --- CRAWLER CORE (v5.1 Logic) ---
     // ==============================================
-
     function getCurrentPath() {
         let path = '';
         document.querySelectorAll('.fm-breadcrumbs').forEach(c => { path += '/' + (c.innerText || '').trim(); });
@@ -390,7 +391,6 @@
             for (let img of images) {
                 if (cancelRequested) break;
                 try {
-                    // v5.1 Specific Node Detection Logic
                     let fileContainer = img.closest('[id^="th_"]') || img.closest('.mega-item-square') || img.closest('a.mega-node');
                     if (!fileContainer && img.parentElement) fileContainer = img.parentElement.parentElement;
 
@@ -407,7 +407,6 @@
                     if (await checkFileExists(nodeId)) { processedIDs.add(nodeId); continue; }
                     if (!img.complete || img.naturalWidth === 0) continue;
 
-                    // Use new v5.2 descriptor logic
                     const desc = await getImageDescriptor(img);
                     if (!desc) { processedIDs.add(nodeId); continue; }
 
