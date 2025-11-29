@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer — Unified v5.5 (Flex UI)
+// @name         Mega.nz Deep Indexer — Unified v6.0 (DB Manager)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,19 +8,19 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      5.5
+// @version      6.0
 // @author       Alex Tol (Fixed by Assistant)
-// @description  🕷️📷 v5.1 Crawler + v5.2 Matcher. Flexbox UI for buttons. Matches > 70%.
+// @description  🕷️📷 Full Suite: Crawler + Exact Matcher + DB Import/Export Manager.
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // НОВАЯ БД
-    const DB_PREFIX = 'MegaSearchDB_v5_Hybrid:';
+    // === CONFIG ===
+    const DB_PREFIX = 'MegaSearchDB_v5_Hybrid:'; // Совместимо с v5.3+
     let isRunning = false;
 
-    // === НАСТРОЙКИ СКОЛЛИНГА ===
+    // Crawler Settings
     const FILE_SCROLL_DELAY = 1500;
     const FILE_SCROLL_STEP = 600;
     const FOLDER_SEARCH_DELAY = 200;
@@ -29,12 +29,12 @@
     let cancelRequested = false;
     const visitedFolderKeys = new Set();
 
-    // === НАСТРОЙКИ АЛГОРИТМА ПОИСКА ===
+    // Matcher Settings
     const GLOBAL_HASH_SIZE = 16;
     const PATCH_GRID = 9;
     const PATCH_HASH_SIZE = 8;
     const PATCH_GOOD_DIST = 10;
-    const SIM_THRESHOLD = 0.70;
+    const SIM_THRESHOLD = 0.70; // 70% threshold
     const MAX_RESULTS = 20;
 
     // ==============================================
@@ -42,6 +42,7 @@
     // ==============================================
     const style = document.createElement('style');
     style.textContent = `
+        /* Modal Base */
         .mega-indexer-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 650px; max-height: 85vh; background: #181818; color: #e0e0e0; z-index: 10000; padding: 0; border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,0.9); font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; border: 1px solid #333; user-select: text !important; cursor: auto; }
         .mega-indexer-header { padding: 15px 20px; border-bottom: 1px solid #2a2a2a; display: flex; justify-content: space-between; align-items: center; background: #202020; border-radius: 12px 12px 0 0; user-select: none; }
         .mega-indexer-title { font-size: 18px; font-weight: 600; margin: 0; color: #fff; }
@@ -49,9 +50,16 @@
         .mega-indexer-close:hover { color: #fff; background: #c0392b; border-radius: 50%; }
         .mega-indexer-body { padding: 20px; overflow-y: auto; flex-grow: 1; scrollbar-width: thin; scrollbar-color: #444 #181818; }
 
+        /* Common Inputs & Buttons */
         .mega-file-input-label { display: block; padding: 25px; background: #222; border: 2px dashed #444; text-align: center; border-radius: 8px; cursor: pointer; transition: 0.2s; color: #aaa; margin-bottom: 20px; }
         .mega-file-input-label:hover, .mega-file-input-label.drag-over { border-color: #8e44ad; color: #fff; background: #292929; }
 
+        .mega-btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; color: white; transition: 0.2s; display: inline-block; margin-right: 10px; }
+        .btn-primary { background: #007bff; } .btn-primary:hover { background: #0056b3; }
+        .btn-success { background: #28a745; } .btn-success:hover { background: #218838; }
+        .btn-danger  { background: #dc3545; } .btn-danger:hover  { background: #c82333; }
+
+        /* Search Results */
         .search-result-item { background: #222; padding: 10px; margin-bottom: 8px; border-radius: 6px; border: 1px solid #333; display: flex; gap: 12px; align-items: flex-start; }
         .search-result-info { flex-grow: 1; overflow: hidden; }
         .search-result-name { font-size: 14px; color: #fff; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
@@ -64,102 +72,224 @@
         .sim-high  { background: rgba(230, 126, 34, 0.15); color: #e67e22; border: 1px solid #e67e22; }
 
         .btn-find-mega { background: #2980b9; color: white; border: none; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: auto; }
-        .btn-find-mega:hover { background: #3498db; }
 
-        /* UI Container Styles */
+        /* Control Bar */
         #mega-indexer-controls {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            z-index: 9999;
-            display: flex;
-            flex-direction: row;
-            gap: 10px;
-            align-items: center;
-            pointer-events: none; /* Allows clicking through gaps */
+            position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+            display: flex; flex-direction: row; gap: 10px; align-items: center;
+            pointer-events: none;
         }
         #mega-indexer-controls button {
-            pointer-events: auto; /* Re-enable clicks on buttons */
-            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-            font-family: 'Segoe UI', sans-serif;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: bold;
-            font-size: 14px;
-            padding: 12px 18px;
+            pointer-events: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            font-family: 'Segoe UI', sans-serif; border: none; border-radius: 8px;
+            cursor: pointer; font-weight: bold; font-size: 14px; padding: 12px 18px;
             transition: transform 0.1s;
         }
         #mega-indexer-controls button:active { transform: scale(0.96); }
+
+        /* DB Manager Styles */
+        .db-stat-box { background: #252525; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #333; text-align: center; }
+        .db-stat-number { font-size: 24px; color: #2ecc71; font-weight: bold; }
+        .db-actions { display: flex; gap: 15px; justify-content: center; flex-wrap: wrap; }
+        .import-progress { margin-top: 15px; color: #aaa; font-size: 12px; text-align: center; }
     `;
     document.head.appendChild(style);
-    console.log('[Mega Unified] v5.5 loaded. Flexbox UI.');
+    console.log('[Mega Unified] v6.0 loaded. DB Manager added.');
 
     // ==============================================
     // --- UI ELEMENTS ---
     // ==============================================
     let uiBtn = null;
     let searchBtn = null;
+    let dbBtn = null;
     let cancelBtn = null;
     let statusDiv = null;
     let searchPanel = null;
+    let dbPanel = null;
     let controlsContainer = null;
 
     function createUI(initialCount) {
-        // 1. Create Container
         if (!controlsContainer) {
             controlsContainer = document.createElement('div');
             controlsContainer.id = 'mega-indexer-controls';
             document.body.appendChild(controlsContainer);
         }
 
-        // 2. Create Search Button
+        // 1. DB Manager Button (Left)
+        if (!dbBtn) {
+            dbBtn = document.createElement('button');
+            dbBtn.innerText = '💾 DB';
+            dbBtn.style.backgroundColor = '#28a745'; // Green
+            dbBtn.style.color = 'white';
+            dbBtn.onclick = toggleDBUI;
+            controlsContainer.appendChild(dbBtn);
+        }
+
+        // 2. Search Button (Middle)
         if (!searchBtn) {
             searchBtn = document.createElement('button');
             searchBtn.innerText = '🔍 Search';
-            searchBtn.style.backgroundColor = '#007bff';
+            searchBtn.style.backgroundColor = '#007bff'; // Blue
             searchBtn.style.color = 'white';
             searchBtn.onclick = toggleSearchUI;
             controlsContainer.appendChild(searchBtn);
         }
 
-        // 3. Create Scan Button
+        // 3. Scan Button (Right)
         if (!uiBtn) {
             uiBtn = document.createElement('button');
             updateButtonText(initialCount);
-            uiBtn.style.backgroundColor = '#6f42c1';
+            uiBtn.style.backgroundColor = '#6f42c1'; // Purple
             uiBtn.style.color = 'white';
             uiBtn.onclick = startDeepIndexing;
             controlsContainer.appendChild(uiBtn);
         }
 
-        // 4. Cancel Button (Separate, absolute positioned above)
+        // Cancel Button (Floating)
         if (!cancelBtn) {
             cancelBtn = document.createElement('button');
             cancelBtn.innerText = '✖ Stop';
-            cancelBtn.style.cssText = `
-                position: fixed; bottom: 75px; right: 20px; z-index: 9999;
-                padding: 6px 12px; background-color: #d9534f; color: white;
-                border: none; border-radius: 6px; cursor: pointer;
-                font-weight: bold; font-size: 11px; box-shadow: 0 2px 5px rgba(0,0,0,0.4);
-                opacity: 0.5;
-            `;
+            cancelBtn.style.cssText = `position: fixed; bottom: 75px; right: 20px; z-index: 9999; padding: 6px 12px; background-color: #d9534f; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 11px; box-shadow: 0 2px 5px rgba(0,0,0,0.4); opacity: 0.5;`;
             cancelBtn.disabled = true;
             cancelBtn.onclick = () => { if (!isRunning || cancelRequested) return; cancelRequested = true; cancelBtn.innerText = 'Stopping...'; };
             document.body.appendChild(cancelBtn);
         }
 
-        // 5. Status Div
         if (!statusDiv) {
             statusDiv = document.createElement('div');
-            statusDiv.style.cssText = `
-                position: fixed; bottom: 110px; right: 20px; z-index: 9999;
-                padding: 5px 10px; background-color: rgba(0,0,0,0.8); color: #0f0;
-                border-radius: 4px; font-size: 10px; font-family: monospace;
-                max-width: 250px; display: none; pointer-events: none;
-            `;
+            statusDiv.style.cssText = `position: fixed; bottom: 110px; right: 20px; z-index: 9999; padding: 5px 10px; background-color: rgba(0,0,0,0.8); color: #0f0; border-radius: 4px; font-size: 10px; font-family: monospace; max-width: 250px; display: none; pointer-events: none;`;
             document.body.appendChild(statusDiv);
         }
+    }
+
+    // ========== DB MANAGER UI ==========
+    async function toggleDBUI() {
+        if (dbPanel) {
+            dbPanel.style.display = dbPanel.style.display === 'none' ? 'flex' : 'none';
+            if (dbPanel.style.display === 'flex') refreshDBStats();
+            return;
+        }
+
+        dbPanel = document.createElement('div');
+        dbPanel.className = 'mega-indexer-modal';
+        ['mousedown', 'click'].forEach(ev => dbPanel.addEventListener(ev, e => e.stopPropagation()));
+
+        dbPanel.innerHTML = `
+            <div class="mega-indexer-header">
+                <h3 class="mega-indexer-title">💾 Database Manager</h3>
+                <div class="mega-indexer-close" id="btnDBClose">✖</div>
+            </div>
+            <div class="mega-indexer-body">
+                <div class="db-stat-box">
+                    <div style="font-size:12px; color:#888; margin-bottom:5px;">Total Indexed Images</div>
+                    <div class="db-stat-number" id="dbTotalCount">0</div>
+                </div>
+
+                <div class="db-actions">
+                    <button class="mega-btn btn-primary" id="btnExportDB">⬇ Export JSON</button>
+                    <button class="mega-btn btn-success" id="btnImportTrigger">⬆ Import JSON</button>
+                    <button class="mega-btn btn-danger" id="btnClearDB">🗑 Clear DB</button>
+                </div>
+
+                <input type="file" id="fileImportDB" accept=".json" style="display:none">
+
+                <div id="dbOpStatus" class="import-progress"></div>
+
+                <div style="margin-top:20px; font-size:11px; color:#666; text-align:center; border-top:1px solid #333; padding-top:10px;">
+                    Database is stored locally in Violentmonkey storage.<br>
+                    Export before clearing browser data!
+                </div>
+            </div>
+        `;
+        document.body.appendChild(dbPanel);
+
+        document.getElementById('btnDBClose').onclick = () => dbPanel.style.display = 'none';
+        document.getElementById('btnExportDB').onclick = exportDatabase;
+        document.getElementById('btnClearDB').onclick = clearDatabase;
+
+        const importInput = document.getElementById('fileImportDB');
+        const importBtn = document.getElementById('btnImportTrigger');
+
+        importBtn.onclick = () => importInput.click();
+        importInput.onchange = (e) => importDatabase(e.target.files[0]);
+
+        refreshDBStats();
+    }
+
+    async function refreshDBStats() {
+        const count = await getDBCount();
+        const el = document.getElementById('dbTotalCount');
+        if(el) el.innerText = count;
+        updateButtonText(count);
+    }
+
+    async function exportDatabase() {
+        const status = document.getElementById('dbOpStatus');
+        status.innerText = 'Preparing export...';
+        try {
+            const keys = await GM.listValues();
+            const data = [];
+            for (const key of keys) {
+                if (key.startsWith(DB_PREFIX)) {
+                    data.push(await GM.getValue(key));
+                }
+            }
+            const blob = new Blob([JSON.stringify(data)], {type: "application/json"});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `MegaIndex_Backup_${new Date().toISOString().slice(0,10)}.json`;
+            a.click();
+            status.innerText = `✅ Exported ${data.length} items.`;
+        } catch (e) {
+            status.innerText = `❌ Error: ${e.message}`;
+        }
+    }
+
+    async function importDatabase(file) {
+        if (!file) return;
+        const status = document.getElementById('dbOpStatus');
+        status.innerText = 'Reading file...';
+
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            try {
+                const data = JSON.parse(e.target.result);
+                if (!Array.isArray(data)) throw new Error("Invalid JSON format");
+
+                status.innerText = `Importing ${data.length} items... (This may take time)`;
+                let count = 0;
+
+                for (const item of data) {
+                    if (item.nodeId && item.blocks) {
+                        await addFileToDB(item);
+                        count++;
+                        if (count % 100 === 0) status.innerText = `Importing... ${count} / ${data.length}`;
+                    }
+                }
+                status.innerText = `✅ Successfully imported ${count} items!`;
+                refreshDBStats();
+            } catch (err) {
+                status.innerText = `❌ Error: ${err.message}`;
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    async function clearDatabase() {
+        if (!confirm("Are you sure you want to delete the entire index? This cannot be undone.")) return;
+
+        const status = document.getElementById('dbOpStatus');
+        status.innerText = 'Clearing database...';
+
+        const keys = await GM.listValues();
+        for (const key of keys) {
+            if (key.startsWith(DB_PREFIX)) {
+                await GM.deleteValue(key);
+            }
+        }
+        status.innerText = '✅ Database cleared.';
+        refreshDBStats();
     }
 
     // ========== SEARCH PANEL ==========
@@ -293,7 +423,7 @@
     }
 
     // ==============================================
-    // --- MATCHING ENGINE ---
+    // --- ENGINE (Same as v5.5) ---
     // ==============================================
     async function searchInDB(queryDesc) {
         const keys = await GM.listValues();
@@ -308,7 +438,6 @@
 
             const globalDist = calculateHammingDistance(qGlobal, record.globalHash);
             const globalSim = 1 - (globalDist / (GLOBAL_HASH_SIZE * GLOBAL_HASH_SIZE));
-
             const localSim = calculateSubsetScore(qBlocks, record.blocks);
             const finalScore = Math.max(globalSim, localSim);
 
@@ -349,16 +478,11 @@
         return d;
     }
 
-    // ==============================================
-    // --- HASHING ---
-    // ==============================================
     async function getImageDescriptor(img) {
         const w = img.naturalWidth || img.width;
         const h = img.naturalHeight || img.height;
         if (!w || !h || w < 32 || h < 32) return null;
-
         const globalHash = computeHash(img, 0, 0, w, h, GLOBAL_HASH_SIZE, 1);
-
         const blocks = [];
         const grid = PATCH_GRID;
         const tileW = w / grid;
@@ -422,11 +546,9 @@
         if (!scroller) return 0;
         scroller.scrollTop = 0;
         await delay(1000);
-
         let processedCount = 0;
         let stuckCounter = 0;
         const processedIDs = new Set();
-
         while (!cancelRequested) {
             const images = scroller.querySelectorAll('.fm-item-img img');
             for (let img of images) {
@@ -434,35 +556,28 @@
                 try {
                     let fileContainer = img.closest('[id^="th_"]') || img.closest('.mega-item-square') || img.closest('a.mega-node');
                     if (!fileContainer && img.parentElement) fileContainer = img.parentElement.parentElement;
-
                     let name = 'Unknown';
                     if (fileContainer) {
                         const nameEl = fileContainer.querySelector('.block-view-file-name, .file-name, .fm-item-name');
                         if (nameEl) name = (nameEl.innerText || '').split('\n')[0].trim();
                     }
-
                     let nodeId = fileContainer?.id?.startsWith('th_') ? fileContainer.id : (fileContainer?.dataset?.nodeId || null);
                     if (!nodeId) nodeId = name.length > 3 ? 'name_' + name : 'src_' + img.src.slice(-20);
-
                     if (processedIDs.has(nodeId)) continue;
                     if (await checkFileExists(nodeId)) { processedIDs.add(nodeId); continue; }
                     if (!img.complete || img.naturalWidth === 0) continue;
-
                     const desc = await getImageDescriptor(img);
                     if (!desc) { processedIDs.add(nodeId); continue; }
-
                     await addFileToDB({ nodeId, name, path: getCurrentPath(), globalHash: desc.globalHash, blocks: desc.blocks, timestamp: Date.now() });
                     processedIDs.add(nodeId);
                     processedCount++;
                     updateStatus(`Indexed: ${processedCount}`);
                 } catch (err) { console.error(err); }
             }
-
             if (cancelRequested) break;
             const prevScrollTop = scroller.scrollTop;
             scroller.scrollBy(0, FILE_SCROLL_STEP);
             await delay(FILE_SCROLL_DELAY);
-
             if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) {
                 stuckCounter++;
                 if (stuckCounter >= 2) break;
@@ -474,35 +589,26 @@
     function triggerDoubleClick(element) {
         element.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: unsafeWindow }));
     }
-
     function goBack() {
         const crumbs = document.querySelectorAll('.fm-breadcrumbs');
-        if (crumbs.length >= 2) {
-            crumbs[crumbs.length - 2].click();
-            return true;
-        }
+        if (crumbs.length >= 2) { crumbs[crumbs.length - 2].click(); return true; }
         return false;
     }
-
     function waitForContentChange() { return delay(NAVIGATION_DELAY); }
-
     function getFolderName(elem) {
         const nameEl = elem.querySelector('.fm-item-name, .tranfer-filetype-txt, .block-view-file-name, .file-name, span.name');
         return nameEl ? (nameEl.innerText || '').trim() : (elem.innerText || '').split('\n')[0].trim();
     }
-
     function getAllFolderContainers() {
         const result = [];
         const seen = new Set();
-        document.querySelectorAll('.mega-node.folder, tr.megaListItem .folder, .mega-item-square .folder')
-            .forEach(node => {
-                const container = node.closest('.mega-node, tr.megaListItem, .mega-item-square') || node;
-                const name = getFolderName(container);
-                if (name && !seen.has(name)) { seen.add(name); result.push({ element: container, name }); }
-            });
+        document.querySelectorAll('.mega-node.folder, tr.megaListItem .folder, .mega-item-square .folder').forEach(node => {
+            const container = node.closest('.mega-node, tr.megaListItem, .mega-item-square') || node;
+            const name = getFolderName(container);
+            if (name && !seen.has(name)) { seen.add(name); result.push({ element: container, name }); }
+        });
         return result;
     }
-
     function findNextUnvisitedFolder() {
         for (const f of getAllFolderContainers()) {
             const key = getCurrentPath() + '::' + f.name;
@@ -510,16 +616,12 @@
         }
         return null;
     }
-
     async function deepScanCurrentFolder(depth = 0, maxDepth = 50) {
         if (cancelRequested || depth > maxDepth) return;
         console.log(`[Mega Unified] 📁 [Level ${depth}] ${getCurrentPath()}`);
-
         await scanCurrentFolder();
-
         const scroller = document.querySelector('.file-block-scrolling');
         if (scroller) { scroller.scrollTop = 0; await delay(1000); }
-
         while (!cancelRequested) {
             const nextFolder = findNextUnvisitedFolder();
             if (!nextFolder) {
@@ -531,7 +633,6 @@
                     continue;
                 } else { break; }
             }
-
             visitedFolderKeys.add(nextFolder.key);
             updateStatus(`>>> ${nextFolder.name}`);
             await delay(500);
@@ -555,7 +656,6 @@
         cancelBtn.style.opacity = '1';
         cancelBtn.innerText = '✖ Stop';
         if (searchBtn) searchBtn.disabled = true;
-
         try {
             updateStatus('Starting hybrid indexer...');
             await deepScanCurrentFolder(0);
