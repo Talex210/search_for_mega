@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer — Unified v8.2 (Smart Wait)
+// @name         Mega.nz Deep Indexer — Unified v8.3 (HSV + Adaptive)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,9 +8,9 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      8.2
+// @version      8.3
 // @author       Alex Tol (Fixed by Assistant)
-// @description  🕷️📷 Web Worker Search + Smart Waiting for Previews.
+// @description  🕷️📷 Web Worker Search + HSV Color Matching + Smart Waiting.
 // ==/UserScript==
 
 (function() {
@@ -31,33 +31,39 @@
     const FOLDER_SEARCH_DELAY = 200;
     const FOLDER_SEARCH_STEP = 1200;
     const NAVIGATION_DELAY = 3000;
-
     let cancelRequested = false;
     const visitedFolderKeys = new Set();
 
-    // Matcher Settings
+    // Matcher Settings (ADAPTIVE)
     const CONFIG = {
         GLOBAL_HASH_SIZE: 16,
         PATCH_GRID: 9,
         PATCH_HASH_SIZE: 8,
         PATCH_GOOD_DIST: 10,
-        SIM_THRESHOLD: 0.70,
-        MAX_RESULTS: 20
+        // Weights
+        WEIGHT_STRUCT: 0.70, // Структура важнее
+        WEIGHT_COLOR: 0.30,  // Цвет вспомогательный
+        // Thresholds
+        MIN_FINAL_SCORE: 0.72, // Общий порог
+        MIN_STRUCT_SCORE: 0.55 // Минимальное совпадение по форме, даже если цвета идеальны
     };
 
     // ==============================================
-    // --- WEB WORKER CODE ---
+    // --- WEB WORKER CODE (Structure + HSV) ---
     // ==============================================
     const WORKER_CODE = `
     self.onmessage = function(e) {
         const { type, payload } = e.data;
+
         if (type === 'SEARCH') {
             const { db, query, config } = payload;
             const results = [];
             const qGlobal = query.globalHash;
             const qBlocks = query.blocks;
+            const qColor = query.colorSig; // [ [h,s,v], [h,s,v]... ] 9 zones
             const total = db.length;
 
+            // Hamming Distance Helper
             function getDist(h1, h2) {
                 if(!h1 || !h2) return 256;
                 let d = 0;
@@ -68,10 +74,35 @@
                 return d;
             }
 
+            // Color Distance Helper (Euclidean in HSV cylinder approximation)
+            function getColorSim(c1, c2) {
+                if (!c1 || !c2 || c1.length !== c2.length) return 0.5; // Neutral if missing
+                let totalSim = 0;
+                // Compare each zone (3x3 grid = 9 zones)
+                for (let i = 0; i < c1.length; i++) {
+                     const [h1, s1, v1] = c1[i];
+                     const [h2, s2, v2] = c2[i];
+
+                     // Hue diff (circular)
+                     let dh = Math.abs(h1 - h2);
+                     if (dh > 0.5) dh = 1 - dh;
+                     dh = dh * 2; // normalize to 0-1 range roughly
+
+                     const ds = Math.abs(s1 - s2);
+                     const dv = Math.abs(v1 - v2);
+
+                     // Zone diff
+                     const zoneDiff = (dh + ds + dv) / 3;
+                     totalSim += (1 - zoneDiff);
+                }
+                return totalSim / c1.length;
+            }
+
             for (let i = 0; i < total; i++) {
                 const record = db[i];
                 if (!record.globalHash || !record.blocks) continue;
 
+                // 1. STRUCTURAL MATCH (Phash)
                 const gDist = getDist(qGlobal, record.globalHash);
                 const gSim = 1 - (gDist / (config.GLOBAL_HASH_SIZE * config.GLOBAL_HASH_SIZE));
 
@@ -90,31 +121,50 @@
                         if (best <= config.PATCH_GOOD_DIST) strongMatches++;
                     }
                 }
-
                 const lSim = blocksA.length ? (strongMatches / blocksA.length) : 0;
-                const finalScore = Math.max(gSim, lSim);
+                const structScore = Math.max(gSim, lSim);
 
-                if (finalScore >= config.SIM_THRESHOLD) {
+                // Optimization: If structure is totally wrong, skip color calc
+                if (structScore < config.MIN_STRUCT_SCORE) continue;
+
+                // 2. COLOR MATCH (HSV)
+                let finalScore = 0;
+                let colorScore = 0;
+
+                // Check if record has color data (Legacy support)
+                if (qColor && record.colorSig) {
+                    colorScore = getColorSim(qColor, record.colorSig);
+                    // Hybrid Formula
+                    finalScore = (structScore * config.WEIGHT_STRUCT) + (colorScore * config.WEIGHT_COLOR);
+                } else {
+                    // Fallback for old DB records without HSV
+                    finalScore = structScore;
+                    colorScore = -1; // Marker for UI
+                }
+
+                if (finalScore >= config.MIN_FINAL_SCORE) {
                     let matchType = 'High';
-                    if (gSim > 0.85) matchType = 'Exact';
+                    if (structScore > 0.85 && (colorScore > 0.85 || colorScore === -1)) matchType = 'Exact';
                     else if (lSim >= 0.70) matchType = 'Crop/Part';
 
                     results.push({
                         name: record.name,
                         path: record.path,
                         nodeId: record.nodeId,
-                        globalSim: gSim,
-                        localSim: lSim,
+                        structSim: structScore,
+                        colorSim: colorScore,
                         finalScore: finalScore,
                         matchType: matchType
                     });
                 }
+
                 if (i % 1000 === 0) {
                     self.postMessage({ type: 'PROGRESS', loaded: i, total: total });
                 }
             }
+
             results.sort((a, b) => b.finalScore - a.finalScore);
-            const top = results.slice(0, config.MAX_RESULTS);
+            const top = results.slice(0, 20); // Top 20
             self.postMessage({ type: 'DONE', results: top });
         }
     };
@@ -137,26 +187,21 @@
         .mega-indexer-title { font-size: 18px; font-weight: 600; margin: 0; color: #fff; }
         .mega-indexer-close { cursor: pointer; font-size: 20px; color: #888; width: 30px; height: 30px; text-align: center; line-height: 30px; transition: 0.2s; }
         .mega-indexer-close:hover { color: #fff; background: #c0392b; border-radius: 50%; }
-
         /* Body & Scroll Fixes */
-        .mega-indexer-body { padding: 20px; overflow-y: auto; overflow-x: hidden; flex-grow: 1; scrollbar-width: thin; scrollbar-color: #444 #181818; display: flex; flex-direction: column; gap: 15px; /* Uniform spacing between elements */ box-sizing: border-box; }
-
-        /* Progress Bar (Centered) */
+        .mega-indexer-body { padding: 20px; overflow-y: auto; overflow-x: hidden; flex-grow: 1; scrollbar-width: thin; scrollbar-color: #444 #181818; display: flex; flex-direction: column; gap: 15px; box-sizing: border-box; }
+        /* Progress Bar */
         .progress-container { width: 100%; background-color: #333; border-radius: 10px; height: 24px; overflow: hidden; display: none; position: relative; box-sizing: border-box; }
         .progress-bar { height: 100%; background-color: #28a745; width: 0%; transition: width 0.1s; }
         .progress-text { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: bold; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
-
         /* Inputs */
         .mega-file-input-label { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; background: #222; border: 2px dashed #444; border-radius: 8px; cursor: pointer; transition: 0.2s; color: #aaa; width: 100%; box-sizing: border-box; }
         .mega-file-input-label:hover, .mega-file-input-label.drag-over { border-color: #8e44ad; color: #fff; background: #292929; }
-
         /* Buttons */
         .mega-btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; color: white; transition: 0.2s; display: inline-block; margin-right: 10px; }
         .btn-primary { background: #007bff; } .btn-primary:hover { background: #0056b3; }
         .btn-success { background: #28a745; } .btn-success:hover { background: #218838; }
         .btn-danger { background: #dc3545; } .btn-danger:hover { background: #c82333; }
-
-        /* Results (Symmetrical) */
+        /* Results */
         .search-result-item { background: #222; padding: 12px; border-radius: 8px; border: 1px solid #333; display: flex; gap: 15px; align-items: flex-start; width: 100%; box-sizing: border-box; }
         .search-result-info { flex-grow: 1; overflow: hidden; }
         .search-result-name { font-size: 14px; color: #fff; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
@@ -168,12 +213,10 @@
         .sim-high { background: rgba(230, 126, 34, 0.15); color: #e67e22; border: 1px solid #e67e22; }
         .btn-find-mega { background: #2980b9; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: auto; }
         .btn-find-mega:hover { background: #3498db; }
-
         /* Controls */
         #mega-indexer-controls { position: fixed; bottom: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: row; gap: 10px; align-items: center; pointer-events: none; }
         #mega-indexer-controls button { pointer-events: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5); font-family: 'Segoe UI', sans-serif; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px; padding: 12px 18px; transition: transform 0.1s; }
         #mega-indexer-controls button:active { transform: scale(0.96); }
-
         /* DB Manager */
         .db-stat-box { background: #252525; padding: 15px; border-radius: 8px; border: 1px solid #333; text-align: center; width: 100%; box-sizing: border-box; }
         .db-stat-number { font-size: 24px; color: #2ecc71; font-weight: bold; }
@@ -181,7 +224,7 @@
         .import-status { margin-top: 10px; color: #aaa; font-size: 12px; text-align: center; }
     `;
     document.head.appendChild(style);
-    console.log('[Mega Unified] v8.2 loaded. Smart Wait Logic.');
+    console.log('[Mega Unified] v8.3 loaded. HSV + Adaptive Thresholds.');
 
     // ==============================================
     // --- UI ELEMENTS ---
@@ -353,7 +396,10 @@
                 for (let i = 0; i < data.length; i++) {
                     await addFileToDB(data[i]);
                     count++;
-                    if(i % 200 === 0) { status.innerText = `Writing ${i}/${data.length}...`; await delay(0); }
+                    if(i % 200 === 0) {
+                        status.innerText = `Writing ${i}/${data.length}...`;
+                        await delay(0);
+                    }
                 }
                 RAM_DB = null;
                 status.innerText = `✅ Imported ${count} items.`;
@@ -385,7 +431,7 @@
         ['mousedown', 'mouseup', 'click'].forEach(ev => searchPanel.addEventListener(ev, e => e.stopPropagation()));
         searchPanel.innerHTML = `
             <div class="mega-indexer-header">
-                <h3 class="mega-indexer-title">📷 Smart Search (Web Worker)</h3>
+                <h3 class="mega-indexer-title">📷 Smart Search (HSV+Hash)</h3>
                 <div class="mega-indexer-close" id="btnSearchClose">✖</div>
             </div>
             <div class="mega-indexer-body">
@@ -410,13 +456,13 @@
         progressContainer = document.getElementById('megaProgressBar');
         progressBar = document.getElementById('megaProgressFill');
         progressText = document.getElementById('megaProgressText');
+
         const closeBtn = document.getElementById('btnSearchClose');
         const fileInput = document.getElementById('megaSearchInput');
         const dropZone = document.getElementById('megaDropZone');
 
         closeBtn.onclick = () => searchPanel.style.display = 'none';
         fileInput.addEventListener('change', (e) => processFile(e.target.files[0]));
-
         ['dragenter','dragover','dragleave','drop'].forEach(n => dropZone.addEventListener(n, e => {e.preventDefault();e.stopPropagation()}, false));
         dropZone.addEventListener('dragenter', () => dropZone.classList.add('drag-over'));
         dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
@@ -432,11 +478,15 @@
         const previewDiv = document.getElementById('megaSearchPreview');
         const previewImg = document.getElementById('previewImg');
 
-        if (previewImg.src) { try { URL.revokeObjectURL(previewImg.src); } catch(e) {} }
+        if (previewImg.src) {
+            try { URL.revokeObjectURL(previewImg.src); } catch(e) {}
+        }
+
         resultsDiv.innerHTML = '<div style="text-align:center; padding:20px;">⏳ Preparing...</div>';
         const imgUrl = URL.createObjectURL(file);
         previewImg.src = imgUrl;
         previewDiv.style.display = 'block';
+
         await delay(50);
 
         try {
@@ -468,29 +518,32 @@
             hideProgress();
 
             if (!matches.length) {
-                resultsDiv.innerHTML = `<div style="text-align:center; padding:20px; color:#d9534f;">❌ No matches > 70%.<br><span style="font-size:11px; color:#888;">DB: ${RAM_DB.length}</span></div>`;
+                resultsDiv.innerHTML = `<div style="text-align:center; padding:20px; color:#d9534f;">❌ No matches > ${CONFIG.MIN_FINAL_SCORE*100}%.<br><span style="font-size:11px; color:#888;">DB: ${RAM_DB.length}</span></div>`;
             } else {
                 let html = '';
                 matches.forEach(m => {
-                    const similarity = Math.round(m.finalScore * 100);
+                    const finalScore = Math.round(m.finalScore * 100);
+                    const structScore = Math.round(m.structSim * 100);
+                    const colorScore = m.colorSim === -1 ? 'N/A' : Math.round(m.colorSim * 100) + '%';
+
                     let badge = '';
-                    if (m.matchType === 'Exact') badge = `<span class="sim-badge sim-exact">Exact: ${similarity}%</span>`;
-                    else if (m.matchType === 'Crop/Part') badge = `<span class="sim-badge sim-crop">Inside: ${similarity}%</span>`;
-                    else badge = `<span class="sim-badge sim-high">High: ${similarity}%</span>`;
+                    if (m.matchType === 'Exact') badge = `<span class="sim-badge sim-exact">Exact: ${finalScore}%</span>`;
+                    else if (m.matchType === 'Crop/Part') badge = `<span class="sim-badge sim-crop">Inside: ${finalScore}%</span>`;
+                    else badge = `<span class="sim-badge sim-high">High: ${finalScore}%</span>`;
 
                     html += `
-                        <div class="search-result-item">
-                            <div style="font-size: 24px;">🖼️</div>
-                            <div class="search-result-info">
-                                <div class="search-result-name">${escapeHtml(m.name)}</div>
-                                <div class="search-result-path">${escapeHtml(m.path)}</div>
-                                <div class="search-result-meta">
-                                    ${badge}
-                                    <span style="color:#666; font-size:10px;">G: ${(m.globalSim*100).toFixed(0)}% | L: ${(m.localSim*100).toFixed(0)}%</span>
-                                    <button class="btn-find-mega" data-filename="${escapeHtml(m.name)}">🔍 Find</button>
-                                </div>
+                    <div class="search-result-item">
+                        <div style="font-size: 24px;">🖼️</div>
+                        <div class="search-result-info">
+                            <div class="search-result-name">${escapeHtml(m.name)}</div>
+                            <div class="search-result-path">${escapeHtml(m.path)}</div>
+                            <div class="search-result-meta">
+                                ${badge}
+                                <span style="color:#aaa; font-size:10px;">Shape: ${structScore}% | Color: ${colorScore}</span>
+                                <button class="btn-find-mega" data-filename="${escapeHtml(m.name)}">🔍 Find</button>
                             </div>
-                        </div>`;
+                        </div>
+                    </div>`;
                 });
                 resultsDiv.innerHTML = html;
                 resultsDiv.querySelectorAll('.btn-find-mega').forEach(btn => {
@@ -523,31 +576,36 @@
     }
 
     // ==============================================
-    // --- HASHING ---
+    // --- PROCESSING & HSV HELPERS ---
     // ==============================================
     async function getImageDescriptor(img) {
         const w = img.naturalWidth || img.width;
         const h = img.naturalHeight || img.height;
         if (!w || !h || w < 32 || h < 32) return null;
 
+        // 1. Structural Hashes
         const globalHash = computeHash(img, 0, 0, w, h, CONFIG.GLOBAL_HASH_SIZE, 1);
         const blocks = [];
         const grid = CONFIG.PATCH_GRID;
         const tileW = w / grid;
         const tileH = h / grid;
-
         for (let gy = 0; gy < grid; gy++) {
             for (let gx = 0; gx < grid; gx++) {
                 blocks.push(computeHash(img, gx * tileW, gy * tileH, tileW, tileH, CONFIG.PATCH_HASH_SIZE, 0.5));
             }
         }
-        return { globalHash, blocks };
+
+        // 2. HSV Color Signature (3x3 Grid)
+        const colorSig = computeHSVGrid(img, 3);
+
+        return { globalHash, blocks, colorSig };
     }
 
     function computeHash(img, sx, sy, sw, sh, size, blur) {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
-        canvas.width = size + 1; canvas.height = size;
+        canvas.width = size + 1;
+        canvas.height = size;
         ctx.filter = `grayscale(100%) blur(${blur}px)`;
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
         const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -568,6 +626,64 @@
             hex += parseInt(bin.substring(i, i + 4), 2).toString(16);
         }
         return hex;
+    }
+
+    // --- HSV GRID COMPUTATION ---
+    function computeHSVGrid(img, gridSize) {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        // Resize to a manageable size to average colors (e.g., 30x30)
+        const workSize = 30;
+        canvas.width = workSize;
+        canvas.height = workSize;
+        ctx.drawImage(img, 0, 0, workSize, workSize);
+
+        const imgData = ctx.getImageData(0, 0, workSize, workSize);
+        const pixels = imgData.data;
+        const zoneSize = workSize / gridSize;
+
+        const signature = [];
+
+        for(let zy=0; zy<gridSize; zy++) {
+            for(let zx=0; zx<gridSize; zx++) {
+                let sumH=0, sumS=0, sumV=0, count=0;
+
+                // Iterate pixels in this zone
+                for(let y = Math.floor(zy*zoneSize); y < Math.floor((zy+1)*zoneSize); y++) {
+                    for(let x = Math.floor(zx*zoneSize); x < Math.floor((zx+1)*zoneSize); x++) {
+                        const i = (y * workSize + x) * 4;
+                        const r = pixels[i], g = pixels[i+1], b = pixels[i+2];
+                        const [h,s,v] = rgbToHsv(r,g,b);
+                        sumH += h; sumS += s; sumV += v;
+                        count++;
+                    }
+                }
+                if(count > 0) {
+                    signature.push([ sumH/count, sumS/count, sumV/count ]);
+                } else {
+                    signature.push([0,0,0]);
+                }
+            }
+        }
+        return signature;
+    }
+
+    function rgbToHsv(r, g, b) {
+        r /= 255, g /= 255, b /= 255;
+        var max = Math.max(r, g, b), min = Math.min(r, g, b);
+        var h, s, v = max;
+        var d = max - min;
+        s = max == 0 ? 0 : d / max;
+        if (max == min) { h = 0; }
+        else {
+            switch (max) {
+                case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+                case g: h = (b - r) / d + 2; break;
+                case b: h = (r - g) / d + 4; break;
+            }
+            h /= 6;
+        }
+        return [h, s, v];
     }
 
     // ==============================================
@@ -601,28 +717,23 @@
         return path || '/root';
     }
 
-    // --- NEW: Wait for all images in a list to become blobs or loaded ---
+    // --- Smart Wait Logic ---
     async function waitForBatchLoading(imagesToWait, timeout = 3000) {
         if (imagesToWait.length === 0) return;
-
         const startTime = Date.now();
         updateStatus(`Waiting for ${imagesToWait.length} images...`);
-
         while (Date.now() - startTime < timeout) {
             let allReady = true;
             for (let img of imagesToWait) {
-                // Проверяем, является ли SRC ссылкой на blob (признак загрузки в Mega)
-                // И проверяем complete, чтобы убедиться что браузер отрисовал
                 const isBlob = img.src && img.src.startsWith('blob:');
                 if (!isBlob || !img.complete || img.naturalWidth === 0) {
                     allReady = false;
                     break;
                 }
             }
-            if (allReady) return; // Все загрузились!
-            await delay(200); // Ждем 200мс перед повторной проверкой
+            if (allReady) return;
+            await delay(200);
         }
-        // Если мы здесь, значит тайм-аут вышел, продолжаем с тем что есть
     }
 
     async function scanCurrentFolder() {
@@ -637,10 +748,8 @@
 
         while (!cancelRequested) {
             const images = Array.from(scroller.querySelectorAll('.fm-item-img img'));
-
-            // 1. Фильтруем: находим только те картинки, которых НЕТ в базе.
-            //    Нет смысла ждать загрузки тех, что мы уже знаем.
             const candidates = [];
+
             for (let img of images) {
                 let fileContainer = img.closest('[id^="th_"]') || img.closest('.mega-item-square') || img.closest('a.mega-node');
                 if (!fileContainer && img.parentElement) fileContainer = img.parentElement.parentElement;
@@ -657,26 +766,20 @@
                 if (!processedIDs.has(nodeId) && !(await checkFileExists(nodeId))) {
                     candidates.push({ img, nodeId, name });
                 } else {
-                    processedIDs.add(nodeId); // Запоминаем, что этот ID пропускаем
+                    processedIDs.add(nodeId);
                 }
             }
 
-            // 2. Ждем загрузки (превращения в blob) только кандидатов
             const imgsToWait = candidates.map(c => c.img);
             if (imgsToWait.length > 0) {
                 await waitForBatchLoading(imgsToWait, IMAGE_LOAD_TIMEOUT);
             }
 
-            // 3. Сканируем
             for (let item of candidates) {
                 if (cancelRequested) break;
                 const { img, nodeId, name } = item;
 
-                // Финальная проверка перед хешированием
-                if (!img.complete || img.naturalWidth === 0 || !img.src.startsWith('blob:')) {
-                    // Даже после ожидания картинка не прогрузилась -> пропускаем
-                    continue;
-                }
+                if (!img.complete || img.naturalWidth === 0 || !img.src.startsWith('blob:')) continue;
 
                 try {
                     const desc = await getImageDescriptor(img);
@@ -688,11 +791,13 @@
                         path: getCurrentPath(),
                         globalHash: desc.globalHash,
                         blocks: desc.blocks,
+                        colorSig: desc.colorSig, // SAVE HSV DATA
                         timestamp: Date.now()
                     };
 
                     await addFileToDB(record);
                     if (RAM_DB) RAM_DB.push(record);
+
                     processedIDs.add(nodeId);
                     processedCount++;
                     updateStatus(`Indexed: ${processedCount}`);
@@ -825,4 +930,5 @@
             createUI(await getDBCount());
         }
     }, 1000);
+
 })();
