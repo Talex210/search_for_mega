@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer — Unified v8.1 (UI Polish)
+// @name         Mega.nz Deep Indexer — Unified v8.2 (Smart Wait)
 // @namespace    Violentmonkey Scripts
 // @match        https://mega.nz/*
 // @match        https://mega.io/*
@@ -8,9 +8,9 @@
 // @grant        GM.listValues
 // @grant        GM.deleteValue
 // @grant        unsafeWindow
-// @version      8.1
-// @author       Alex Tol (UI Polish by Assistant)
-// @description  🕷️📷 Web Worker Search + Symmetrical UI + No Scrolling bugs.
+// @version      8.2
+// @author       Alex Tol (Fixed by Assistant)
+// @description  🕷️📷 Web Worker Search + Smart Waiting for Previews.
 // ==/UserScript==
 
 (function() {
@@ -25,11 +25,13 @@
     let searchWorker = null;
 
     // Crawler Settings
-    const FILE_SCROLL_DELAY = 1500;
+    const IMAGE_LOAD_TIMEOUT = 3500; // Ждем до 3.5 сек пока превью прогрузятся
+    const FILE_SCROLL_DELAY = 1000;  // Пауза после скролла
     const FILE_SCROLL_STEP = 600;
     const FOLDER_SEARCH_DELAY = 200;
     const FOLDER_SEARCH_STEP = 1200;
     const NAVIGATION_DELAY = 3000;
+
     let cancelRequested = false;
     const visitedFolderKeys = new Set();
 
@@ -49,7 +51,6 @@
     const WORKER_CODE = `
     self.onmessage = function(e) {
         const { type, payload } = e.data;
-
         if (type === 'SEARCH') {
             const { db, query, config } = payload;
             const results = [];
@@ -89,8 +90,8 @@
                         if (best <= config.PATCH_GOOD_DIST) strongMatches++;
                     }
                 }
-                const lSim = blocksA.length ? (strongMatches / blocksA.length) : 0;
 
+                const lSim = blocksA.length ? (strongMatches / blocksA.length) : 0;
                 const finalScore = Math.max(gSim, lSim);
 
                 if (finalScore >= config.SIM_THRESHOLD) {
@@ -108,12 +109,10 @@
                         matchType: matchType
                     });
                 }
-
                 if (i % 1000 === 0) {
                     self.postMessage({ type: 'PROGRESS', loaded: i, total: total });
                 }
             }
-
             results.sort((a, b) => b.finalScore - a.finalScore);
             const top = results.slice(0, config.MAX_RESULTS);
             self.postMessage({ type: 'DONE', results: top });
@@ -133,82 +132,40 @@
     const style = document.createElement('style');
     style.textContent = `
         /* Modal Base */
-        .mega-indexer-modal {
-            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            width: 600px; max-height: 85vh;
-            background: #181818; color: #e0e0e0; z-index: 10000; padding: 0;
-            border-radius: 12px; box-shadow: 0 25px 80px rgba(0,0,0,0.95);
-            font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column;
-            border: 1px solid #333; user-select: text !important; cursor: auto;
-            box-sizing: border-box;
-        }
-        .mega-indexer-header {
-            padding: 15px 20px; border-bottom: 1px solid #2a2a2a;
-            display: flex; justify-content: space-between; align-items: center;
-            background: #202020; border-radius: 12px 12px 0 0; user-select: none;
-        }
+        .mega-indexer-modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 600px; max-height: 85vh; background: #181818; color: #e0e0e0; z-index: 10000; padding: 0; border-radius: 12px; box-shadow: 0 25px 80px rgba(0,0,0,0.95); font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; border: 1px solid #333; user-select: text !important; cursor: auto; box-sizing: border-box; }
+        .mega-indexer-header { padding: 15px 20px; border-bottom: 1px solid #2a2a2a; display: flex; justify-content: space-between; align-items: center; background: #202020; border-radius: 12px 12px 0 0; user-select: none; }
         .mega-indexer-title { font-size: 18px; font-weight: 600; margin: 0; color: #fff; }
         .mega-indexer-close { cursor: pointer; font-size: 20px; color: #888; width: 30px; height: 30px; text-align: center; line-height: 30px; transition: 0.2s; }
         .mega-indexer-close:hover { color: #fff; background: #c0392b; border-radius: 50%; }
 
         /* Body & Scroll Fixes */
-        .mega-indexer-body {
-            padding: 20px;
-            overflow-y: auto;
-            overflow-x: hidden;
-            flex-grow: 1;
-            scrollbar-width: thin;
-            scrollbar-color: #444 #181818;
-            display: flex;
-            flex-direction: column;
-            gap: 15px; /* Uniform spacing between elements */
-            box-sizing: border-box;
-        }
+        .mega-indexer-body { padding: 20px; overflow-y: auto; overflow-x: hidden; flex-grow: 1; scrollbar-width: thin; scrollbar-color: #444 #181818; display: flex; flex-direction: column; gap: 15px; /* Uniform spacing between elements */ box-sizing: border-box; }
 
         /* Progress Bar (Centered) */
-        .progress-container {
-            width: 100%; background-color: #333; border-radius: 10px;
-            height: 24px; overflow: hidden; display: none; position: relative;
-            box-sizing: border-box;
-        }
+        .progress-container { width: 100%; background-color: #333; border-radius: 10px; height: 24px; overflow: hidden; display: none; position: relative; box-sizing: border-box; }
         .progress-bar { height: 100%; background-color: #28a745; width: 0%; transition: width 0.1s; }
-        .progress-text {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 11px; font-weight: bold; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.8);
-        }
+        .progress-text { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: bold; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
 
         /* Inputs */
-        .mega-file-input-label {
-            display: flex; flex-direction: column; align-items: center; justify-content: center;
-            padding: 30px; background: #222; border: 2px dashed #444;
-            border-radius: 8px; cursor: pointer; transition: 0.2s; color: #aaa;
-            width: 100%; box-sizing: border-box;
-        }
+        .mega-file-input-label { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 30px; background: #222; border: 2px dashed #444; border-radius: 8px; cursor: pointer; transition: 0.2s; color: #aaa; width: 100%; box-sizing: border-box; }
         .mega-file-input-label:hover, .mega-file-input-label.drag-over { border-color: #8e44ad; color: #fff; background: #292929; }
 
         /* Buttons */
         .mega-btn { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 13px; color: white; transition: 0.2s; display: inline-block; margin-right: 10px; }
         .btn-primary { background: #007bff; } .btn-primary:hover { background: #0056b3; }
         .btn-success { background: #28a745; } .btn-success:hover { background: #218838; }
-        .btn-danger  { background: #dc3545; } .btn-danger:hover  { background: #c82333; }
+        .btn-danger { background: #dc3545; } .btn-danger:hover { background: #c82333; }
 
         /* Results (Symmetrical) */
-        .search-result-item {
-            background: #222; padding: 12px; border-radius: 8px;
-            border: 1px solid #333; display: flex; gap: 15px; align-items: flex-start;
-            width: 100%; box-sizing: border-box;
-        }
+        .search-result-item { background: #222; padding: 12px; border-radius: 8px; border: 1px solid #333; display: flex; gap: 15px; align-items: flex-start; width: 100%; box-sizing: border-box; }
         .search-result-info { flex-grow: 1; overflow: hidden; }
         .search-result-name { font-size: 14px; color: #fff; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
         .search-result-path { font-size: 11px; color: #888; margin-bottom: 8px; font-family: monospace; word-break: break-all; }
         .search-result-meta { font-size: 11px; display: flex; gap: 10px; align-items: center; user-select: none; flex-wrap: wrap; }
-
         .sim-badge { padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; text-transform: uppercase; }
         .sim-exact { background: rgba(46, 204, 113, 0.15); color: #2ecc71; border: 1px solid #2ecc71; }
-        .sim-crop  { background: rgba(52, 152, 219, 0.15); color: #3498db; border: 1px solid #3498db; }
-        .sim-high  { background: rgba(230, 126, 34, 0.15); color: #e67e22; border: 1px solid #e67e22; }
-
+        .sim-crop { background: rgba(52, 152, 219, 0.15); color: #3498db; border: 1px solid #3498db; }
+        .sim-high { background: rgba(230, 126, 34, 0.15); color: #e67e22; border: 1px solid #e67e22; }
         .btn-find-mega { background: #2980b9; color: white; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: auto; }
         .btn-find-mega:hover { background: #3498db; }
 
@@ -224,7 +181,7 @@
         .import-status { margin-top: 10px; color: #aaa; font-size: 12px; text-align: center; }
     `;
     document.head.appendChild(style);
-    console.log('[Mega Unified] v8.1 loaded. UI Polished.');
+    console.log('[Mega Unified] v8.2 loaded. Smart Wait Logic.');
 
     // ==============================================
     // --- UI ELEMENTS ---
@@ -238,7 +195,6 @@
             controlsContainer.id = 'mega-indexer-controls';
             document.body.appendChild(controlsContainer);
         }
-
         if (!dbBtn) {
             dbBtn = document.createElement('button');
             dbBtn.innerText = '💾 DB';
@@ -247,7 +203,6 @@
             dbBtn.onclick = toggleDBUI;
             controlsContainer.appendChild(dbBtn);
         }
-
         if (!searchBtn) {
             searchBtn = document.createElement('button');
             searchBtn.innerText = '🔍 Search';
@@ -256,7 +211,6 @@
             searchBtn.onclick = toggleSearchUI;
             controlsContainer.appendChild(searchBtn);
         }
-
         if (!uiBtn) {
             uiBtn = document.createElement('button');
             updateButtonText(initialCount);
@@ -265,7 +219,6 @@
             uiBtn.onclick = startDeepIndexing;
             controlsContainer.appendChild(uiBtn);
         }
-
         if (!cancelBtn) {
             cancelBtn = document.createElement('button');
             cancelBtn.innerText = '✖ Stop';
@@ -274,13 +227,11 @@
             cancelBtn.onclick = () => { cancelRequested = true; cancelBtn.innerText = 'Stopping...'; };
             document.body.appendChild(cancelBtn);
         }
-
         if (!statusDiv) {
             statusDiv = document.createElement('div');
             statusDiv.style.cssText = `position: fixed; bottom: 110px; right: 20px; z-index: 9999; padding: 5px 10px; background-color: rgba(0,0,0,0.8); color: #0f0; border-radius: 4px; font-size: 10px; font-family: monospace; max-width: 250px; display: none; pointer-events: none;`;
             document.body.appendChild(statusDiv);
         }
-
         initWorker();
     }
 
@@ -292,7 +243,9 @@
         progressBar.style.width = `${pct}%`;
         progressText.innerText = `${message} ${pct}%`;
     }
-    function hideProgress() { if (progressContainer) setTimeout(() => { progressContainer.style.display = 'none'; }, 300); }
+    function hideProgress() {
+        if (progressContainer) setTimeout(() => { progressContainer.style.display = 'none'; }, 300);
+    }
 
     // ========== DATABASE LOADING (Cached) ==========
     async function loadDatabaseToMemory() {
@@ -402,10 +355,12 @@
                     count++;
                     if(i % 200 === 0) { status.innerText = `Writing ${i}/${data.length}...`; await delay(0); }
                 }
-                RAM_DB = null; // Clear cache to force reload
+                RAM_DB = null;
                 status.innerText = `✅ Imported ${count} items.`;
                 refreshDBStats();
-            } catch (err) { status.innerText = `Error: ${err.message}`; }
+            } catch (err) {
+                status.innerText = `Error: ${err.message}`;
+            }
         };
         reader.readAsText(file);
     }
@@ -438,28 +393,23 @@
                     <div class="progress-bar" id="megaProgressFill"></div>
                     <div class="progress-text" id="megaProgressText">0%</div>
                 </div>
-
                 <label class="mega-file-input-label" id="megaDropZone">
                     <div style="font-size:24px; margin-bottom:10px">📂</div>
                     <input type="file" id="megaSearchInput" accept="image/*" style="display:none">
                     <span>Click to Upload or <b>Drag & Drop</b> Image</span>
                 </label>
-
                 <div id="megaSearchPreview" style="text-align: center; display:none;">
                     <img id="previewImg" style="max-width: 200px; max-height: 150px; border-radius: 6px; border: 2px solid #444; display:block; margin:0 auto;">
                 </div>
-
                 <div id="megaSearchResults">
                     <div style="text-align:center; color: #666; padding: 20px;">Upload an image to search...</div>
                 </div>
             </div>
         `;
         document.body.appendChild(searchPanel);
-
         progressContainer = document.getElementById('megaProgressBar');
         progressBar = document.getElementById('megaProgressFill');
         progressText = document.getElementById('megaProgressText');
-
         const closeBtn = document.getElementById('btnSearchClose');
         const fileInput = document.getElementById('megaSearchInput');
         const dropZone = document.getElementById('megaDropZone');
@@ -484,7 +434,6 @@
 
         if (previewImg.src) { try { URL.revokeObjectURL(previewImg.src); } catch(e) {} }
         resultsDiv.innerHTML = '<div style="text-align:center; padding:20px;">⏳ Preparing...</div>';
-
         const imgUrl = URL.createObjectURL(file);
         previewImg.src = imgUrl;
         previewDiv.style.display = 'block';
@@ -497,17 +446,22 @@
             }
             if (RAM_DB.length === 0) {
                 resultsDiv.innerHTML = '<div style="color:#d9534f; text-align:center;">Database Empty.</div>';
-                hideProgress(); return;
+                hideProgress();
+                return;
             }
 
             const tempImg = new Image();
             tempImg.src = imgUrl;
-            await new Promise((resolve, reject) => { tempImg.onload = resolve; tempImg.onerror = reject; });
+            await new Promise((resolve, reject) => {
+                tempImg.onload = resolve;
+                tempImg.onerror = reject;
+            });
 
             const queryDesc = await getImageDescriptor(tempImg);
             if (!queryDesc) {
                 resultsDiv.innerHTML = '<div style="color:#d9534f; padding:10px;">Image too small.</div>';
-                hideProgress(); return;
+                hideProgress();
+                return;
             }
 
             const matches = await performWorkerSearch(queryDesc);
@@ -523,6 +477,7 @@
                     if (m.matchType === 'Exact') badge = `<span class="sim-badge sim-exact">Exact: ${similarity}%</span>`;
                     else if (m.matchType === 'Crop/Part') badge = `<span class="sim-badge sim-crop">Inside: ${similarity}%</span>`;
                     else badge = `<span class="sim-badge sim-high">High: ${similarity}%</span>`;
+
                     html += `
                         <div class="search-result-item">
                             <div style="font-size: 24px;">🖼️</div>
@@ -562,7 +517,9 @@
                 const ev = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 });
                 input.dispatchEvent(ev);
             }, 150);
-        } else { alert('Search field not found.'); }
+        } else {
+            alert('Search field not found.');
+        }
     }
 
     // ==============================================
@@ -572,11 +529,13 @@
         const w = img.naturalWidth || img.width;
         const h = img.naturalHeight || img.height;
         if (!w || !h || w < 32 || h < 32) return null;
+
         const globalHash = computeHash(img, 0, 0, w, h, CONFIG.GLOBAL_HASH_SIZE, 1);
         const blocks = [];
         const grid = CONFIG.PATCH_GRID;
         const tileW = w / grid;
         const tileH = h / grid;
+
         for (let gy = 0; gy < grid; gy++) {
             for (let gx = 0; gx < grid; gx++) {
                 blocks.push(computeHash(img, gx * tileW, gy * tileH, tileW, tileH, CONFIG.PATCH_HASH_SIZE, 0.5));
@@ -614,72 +573,179 @@
     // ==============================================
     // --- UTILS & CRAWLER ---
     // ==============================================
-    function updateButtonText(count) { if (uiBtn) uiBtn.innerText = `📷 Scan Folders (DB: ${count})`; }
-    function updateStatus(text) { if (statusDiv) { statusDiv.innerText = text; statusDiv.style.display = text ? 'block' : 'none'; } }
-    async function getDBCount() { try { return (await GM.listValues()).filter(k => k.startsWith(DB_PREFIX)).length; } catch (e) { return 0; } }
-    async function addFileToDB(fileData) { try { await GM.setValue(DB_PREFIX + fileData.nodeId, fileData); } catch (e) {} }
-    async function checkFileExists(nodeId) { try { return !!(await GM.getValue(DB_PREFIX + nodeId)); } catch (e) { return false; } }
-    function escapeHtml(str) { return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function updateButtonText(count) {
+        if (uiBtn) uiBtn.innerText = `📷 Scan Folders (DB: ${count})`;
+    }
+    function updateStatus(text) {
+        if (statusDiv) {
+            statusDiv.innerText = text;
+            statusDiv.style.display = text ? 'block' : 'none';
+        }
+    }
+    async function getDBCount() {
+        try { return (await GM.listValues()).filter(k => k.startsWith(DB_PREFIX)).length; } catch (e) { return 0; }
+    }
+    async function addFileToDB(fileData) {
+        try { await GM.setValue(DB_PREFIX + fileData.nodeId, fileData); } catch (e) {}
+    }
+    async function checkFileExists(nodeId) {
+        try { return !!(await GM.getValue(DB_PREFIX + nodeId)); } catch (e) { return false; }
+    }
+    function escapeHtml(str) {
+        return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-    function getCurrentPath() { let path = ''; document.querySelectorAll('.fm-breadcrumbs').forEach(c => { path += '/' + (c.innerText || '').trim(); }); return path || '/root'; }
+    function getCurrentPath() {
+        let path = '';
+        document.querySelectorAll('.fm-breadcrumbs').forEach(c => { path += '/' + (c.innerText || '').trim(); });
+        return path || '/root';
+    }
+
+    // --- NEW: Wait for all images in a list to become blobs or loaded ---
+    async function waitForBatchLoading(imagesToWait, timeout = 3000) {
+        if (imagesToWait.length === 0) return;
+
+        const startTime = Date.now();
+        updateStatus(`Waiting for ${imagesToWait.length} images...`);
+
+        while (Date.now() - startTime < timeout) {
+            let allReady = true;
+            for (let img of imagesToWait) {
+                // Проверяем, является ли SRC ссылкой на blob (признак загрузки в Mega)
+                // И проверяем complete, чтобы убедиться что браузер отрисовал
+                const isBlob = img.src && img.src.startsWith('blob:');
+                if (!isBlob || !img.complete || img.naturalWidth === 0) {
+                    allReady = false;
+                    break;
+                }
+            }
+            if (allReady) return; // Все загрузились!
+            await delay(200); // Ждем 200мс перед повторной проверкой
+        }
+        // Если мы здесь, значит тайм-аут вышел, продолжаем с тем что есть
+    }
 
     async function scanCurrentFolder() {
         const scroller = document.querySelector('.file-block-scrolling');
         if (!scroller) return 0;
         scroller.scrollTop = 0;
         await delay(1000);
+
         let processedCount = 0;
         let stuckCounter = 0;
         const processedIDs = new Set();
+
         while (!cancelRequested) {
-            const images = scroller.querySelectorAll('.fm-item-img img');
+            const images = Array.from(scroller.querySelectorAll('.fm-item-img img'));
+
+            // 1. Фильтруем: находим только те картинки, которых НЕТ в базе.
+            //    Нет смысла ждать загрузки тех, что мы уже знаем.
+            const candidates = [];
             for (let img of images) {
+                let fileContainer = img.closest('[id^="th_"]') || img.closest('.mega-item-square') || img.closest('a.mega-node');
+                if (!fileContainer && img.parentElement) fileContainer = img.parentElement.parentElement;
+
+                let name = 'Unknown';
+                if (fileContainer) {
+                    const nameEl = fileContainer.querySelector('.block-view-file-name, .file-name, .fm-item-name');
+                    if (nameEl) name = (nameEl.innerText || '').split('\n')[0].trim();
+                }
+
+                let nodeId = fileContainer?.id?.startsWith('th_') ? fileContainer.id : (fileContainer?.dataset?.nodeId || null);
+                if (!nodeId) nodeId = name.length > 3 ? 'name_' + name : 'src_' + img.src.slice(-20);
+
+                if (!processedIDs.has(nodeId) && !(await checkFileExists(nodeId))) {
+                    candidates.push({ img, nodeId, name });
+                } else {
+                    processedIDs.add(nodeId); // Запоминаем, что этот ID пропускаем
+                }
+            }
+
+            // 2. Ждем загрузки (превращения в blob) только кандидатов
+            const imgsToWait = candidates.map(c => c.img);
+            if (imgsToWait.length > 0) {
+                await waitForBatchLoading(imgsToWait, IMAGE_LOAD_TIMEOUT);
+            }
+
+            // 3. Сканируем
+            for (let item of candidates) {
                 if (cancelRequested) break;
+                const { img, nodeId, name } = item;
+
+                // Финальная проверка перед хешированием
+                if (!img.complete || img.naturalWidth === 0 || !img.src.startsWith('blob:')) {
+                    // Даже после ожидания картинка не прогрузилась -> пропускаем
+                    continue;
+                }
+
                 try {
-                    let fileContainer = img.closest('[id^="th_"]') || img.closest('.mega-item-square') || img.closest('a.mega-node');
-                    if (!fileContainer && img.parentElement) fileContainer = img.parentElement.parentElement;
-                    let name = 'Unknown';
-                    if (fileContainer) {
-                        const nameEl = fileContainer.querySelector('.block-view-file-name, .file-name, .fm-item-name');
-                        if (nameEl) name = (nameEl.innerText || '').split('\n')[0].trim();
-                    }
-                    let nodeId = fileContainer?.id?.startsWith('th_') ? fileContainer.id : (fileContainer?.dataset?.nodeId || null);
-                    if (!nodeId) nodeId = name.length > 3 ? 'name_' + name : 'src_' + img.src.slice(-20);
-                    if (processedIDs.has(nodeId)) continue;
-                    if (await checkFileExists(nodeId)) { processedIDs.add(nodeId); continue; }
-                    if (!img.complete || img.naturalWidth === 0) continue;
                     const desc = await getImageDescriptor(img);
-                    if (!desc) { processedIDs.add(nodeId); continue; }
-                    const record = { nodeId, name, path: getCurrentPath(), globalHash: desc.globalHash, blocks: desc.blocks, timestamp: Date.now() };
+                    if (!desc) continue;
+
+                    const record = {
+                        nodeId,
+                        name,
+                        path: getCurrentPath(),
+                        globalHash: desc.globalHash,
+                        blocks: desc.blocks,
+                        timestamp: Date.now()
+                    };
+
                     await addFileToDB(record);
                     if (RAM_DB) RAM_DB.push(record);
                     processedIDs.add(nodeId);
                     processedCount++;
                     updateStatus(`Indexed: ${processedCount}`);
-                } catch (err) { console.error(err); }
+                } catch (err) {
+                    console.error(err);
+                }
             }
+
             if (cancelRequested) break;
+
             const prevScrollTop = scroller.scrollTop;
             scroller.scrollBy(0, FILE_SCROLL_STEP);
             await delay(FILE_SCROLL_DELAY);
-            if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) { stuckCounter++; if (stuckCounter >= 2) break; } else { stuckCounter = 0; }
+
+            if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) {
+                stuckCounter++;
+                if (stuckCounter >= 2) break;
+            } else {
+                stuckCounter = 0;
+            }
         }
         return processedCount;
     }
 
-    function triggerDoubleClick(element) { element.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: unsafeWindow })); }
-    function goBack() { const crumbs = document.querySelectorAll('.fm-breadcrumbs'); if (crumbs.length >= 2) { crumbs[crumbs.length - 2].click(); return true; } return false; }
+    function triggerDoubleClick(element) {
+        element.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: unsafeWindow }));
+    }
+    function goBack() {
+        const crumbs = document.querySelectorAll('.fm-breadcrumbs');
+        if (crumbs.length >= 2) { crumbs[crumbs.length - 2].click(); return true; }
+        return false;
+    }
     function waitForContentChange() { return delay(NAVIGATION_DELAY); }
-    function getFolderName(elem) { const nameEl = elem.querySelector('.fm-item-name, .tranfer-filetype-txt, .block-view-file-name, .file-name, span.name'); return nameEl ? (nameEl.innerText || '').trim() : (elem.innerText || '').split('\n')[0].trim(); }
+
+    function getFolderName(elem) {
+        const nameEl = elem.querySelector('.fm-item-name, .tranfer-filetype-txt, .block-view-file-name, .file-name, span.name');
+        return nameEl ? (nameEl.innerText || '').trim() : (elem.innerText || '').split('\n')[0].trim();
+    }
+
     function getAllFolderContainers() {
-        const result = []; const seen = new Set();
+        const result = [];
+        const seen = new Set();
         document.querySelectorAll('.mega-node.folder, tr.megaListItem .folder, .mega-item-square .folder').forEach(node => {
             const container = node.closest('.mega-node, tr.megaListItem, .mega-item-square') || node;
             const name = getFolderName(container);
-            if (name && !seen.has(name)) { seen.add(name); result.push({ element: container, name }); }
+            if (name && !seen.has(name)) {
+                seen.add(name);
+                result.push({ element: container, name });
+            }
         });
         return result;
     }
+
     function findNextUnvisitedFolder() {
         for (const f of getAllFolderContainers()) {
             const key = getCurrentPath() + '::' + f.name;
@@ -687,12 +753,16 @@
         }
         return null;
     }
+
     async function deepScanCurrentFolder(depth = 0, maxDepth = 50) {
         if (cancelRequested || depth > maxDepth) return;
         console.log(`[Mega Unified] 📁 [Level ${depth}] ${getCurrentPath()}`);
+
         await scanCurrentFolder();
+
         const scroller = document.querySelector('.file-block-scrolling');
         if (scroller) { scroller.scrollTop = 0; await delay(1000); }
+
         while (!cancelRequested) {
             const nextFolder = findNextUnvisitedFolder();
             if (!nextFolder) {
@@ -702,7 +772,9 @@
                     await delay(FOLDER_SEARCH_DELAY);
                     if (Math.abs(scroller.scrollTop - prev) < 5) break;
                     continue;
-                } else { break; }
+                } else {
+                    break;
+                }
             }
             visitedFolderKeys.add(nextFolder.key);
             updateStatus(`>>> ${nextFolder.name}`);
@@ -727,6 +799,7 @@
         cancelBtn.style.opacity = '1';
         cancelBtn.innerText = '✖ Stop';
         if (searchBtn) searchBtn.disabled = true;
+
         try {
             updateStatus('Starting hybrid indexer...');
             await deepScanCurrentFolder(0);
