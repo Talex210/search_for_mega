@@ -45,16 +45,14 @@
         FINGERPRINT_SIZE: 32,
         CONTENT_HASH_SAMPLES: 256,
 
-        // v10.4: Balanced weights - sum = 1.0
         WEIGHT_CH: 0.25,
         WEIGHT_FP: 0.25,
         WEIGHT_MS: 0.30,
         WEIGHT_STRUCT: 0.10,
         WEIGHT_COLOR: 0.10,
 
-        // Lowered thresholds to include more results
         MIN_COMBINED_SCORE: 0.35,
-        MAX_RESULTS: 10
+        MAX_RESULTS: 5
     };
 
     const WORKER_CODE = `
@@ -116,13 +114,11 @@
                 const record = db[i];
                 if (!record.globalHash || !record.blocks) continue;
 
-                // Calculate all similarities
                 const chSim = getPixelArraySim(query.contentHash, record.contentHash, 10);
                 const fpSim = getPixelArraySim(query.fingerprint, record.fingerprint, 15);
                 const msSim = getMultiScaleSim(query.multiScale, record.multiScale, config);
                 const colorSim = getColorSim(query.colorSig, record.colorSig);
 
-                // Structural
                 const gDist = getDist(query.globalHash, record.globalHash);
                 const gSim = 1 - (gDist / (config.GLOBAL_HASH_SIZE * config.GLOBAL_HASH_SIZE));
                 let strongMatches = 0;
@@ -141,7 +137,6 @@
                 const lSim = blocksA.length ? (strongMatches / blocksA.length) : 0;
                 const structSim = Math.max(gSim, lSim);
 
-                // v10.4: Combined score - weighted average of ALL available metrics
                 let totalScore = 0;
                 let totalWeight = 0;
 
@@ -165,13 +160,10 @@
                     totalWeight += config.WEIGHT_COLOR;
                 }
 
-                // Normalize score
                 const combinedScore = totalWeight > 0 ? totalScore / totalWeight : 0;
 
-                // Skip if score too low
                 if (combinedScore < config.MIN_COMBINED_SCORE) continue;
 
-                // Determine match type based on combined score
                 let matchType = 'Similar';
                 if (combinedScore >= 0.85) matchType = 'EXACT';
                 else if (combinedScore >= 0.75) matchType = 'VeryClose';
@@ -197,7 +189,6 @@
                 }
             }
 
-            // v10.4: Simple sort by combined score
             results.sort((a, b) => b.combinedScore - a.combinedScore);
 
             self.postMessage({
@@ -243,7 +234,22 @@
         .mega-indexer-body::-webkit-scrollbar { width: 6px; }
         .mega-indexer-body::-webkit-scrollbar-track { background: #111; }
         .mega-indexer-body::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
-        .progress-container { width: 100%; background: #333; border-radius: 4px; height: 18px; overflow: hidden; display: none; position: relative; }
+        .progress-wrapper {
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .progress-container {
+            width: 100%;
+            max-width: 100%;
+            background: #333;
+            border-radius: 4px;
+            height: 18px;
+            overflow: hidden;
+            display: none;
+            position: relative;
+        }
         .progress-bar { height: 100%; background: var(--mega-green); width: 0%; transition: width 0.1s; }
         .progress-text { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold; color: #fff; }
         .mega-file-input-label { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; background: #1e1e1e; border: 2px dashed #444; border-radius: 6px; cursor: pointer; color: #888; }
@@ -262,13 +268,24 @@
         .sim-match { background: rgba(52,152,219,0.10); color: #5dade2; border: 1px solid #5dade2; }
         .sim-possible { background: rgba(155,89,182,0.15); color: #9b59b6; border: 1px solid #9b59b6; }
         .sim-similar { background: rgba(149,165,166,0.15); color: #95a5a6; border: 1px solid #95a5a6; }
-        .metrics-grid { display: grid; grid-template-columns: repeat(5, auto); gap: 4px 10px; font-size: 10px; color: #888; }
+        .metrics-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 12px;
+            font-size: 10px;
+            color: #888;
+        }
+        .metric-item {
+            display: flex;
+            gap: 3px;
+            white-space: nowrap;
+        }
         .metric-label { color: #555; }
         .metric-value { color: #aaa; }
         .metric-value.high { color: #2ecc71; font-weight: 600; }
         .metric-value.medium { color: #f39c12; }
         .combined-score { font-weight: bold; color: #3498db; font-size: 12px; padding: 2px 8px; background: rgba(52,152,219,0.15); border-radius: 4px; margin-left: auto; }
-        .btn-find-mega { background: #2a2a2a; color: #aaa; border: 1px solid #444; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; }
+        .btn-find-mega { background: #2a2a2a; color: #aaa; border: 1px solid #444; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; white-space: nowrap; }
         .btn-find-mega:hover { background: var(--mega-blue); color: white; border-color: var(--mega-blue); }
         #mega-indexer-controls { position: fixed; bottom: 20px; right: 20px; z-index: 9999; display: flex; gap: 8px; pointer-events: none; }
         #mega-indexer-controls button { pointer-events: auto; box-shadow: 0 2px 5px rgba(0,0,0,0.4); border: none; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px; padding: 8px 12px; }
@@ -277,6 +294,8 @@
         .btn-success { background: var(--mega-green); }
         .btn-danger { background: var(--mega-red); }
         .results-info { font-size: 10px; color: #666; text-align: center; padding: 5px; border-bottom: 1px solid #333; }
+        .search-preview-container { text-align: center; padding: 10px; }
+        .search-preview-img { max-width: 250px; max-height: 180px; border-radius: 6px; border: 2px solid #444; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
     `;
     document.head.appendChild(style);
     console.log('[Mega Indexer] v10.4 - Balanced scoring');
@@ -331,13 +350,18 @@
         searchPanel.innerHTML = `
             <div class="mega-indexer-header"><h3 class="mega-indexer-title">📷 Image Search v10.4</h3><div class="mega-indexer-close" id="btnSearchClose">✖</div></div>
             <div class="mega-indexer-body">
-                <div class="progress-container" id="megaProgressBar"><div class="progress-bar" id="megaProgressFill"></div><div class="progress-text" id="megaProgressText">0%</div></div>
+                <div class="progress-wrapper">
+                    <div class="progress-container" id="megaProgressBar">
+                        <div class="progress-bar" id="megaProgressFill"></div>
+                        <div class="progress-text" id="megaProgressText">0%</div>
+                    </div>
+                </div>
                 <label class="mega-file-input-label" id="megaDropZone">
                     <div style="font-size:22px;margin-bottom:8px;opacity:0.7;">📂</div>
                     <input type="file" id="megaSearchInput" accept="image/*" style="display:none">
                     <span style="font-size:12px;">Drop image or Click</span>
                 </label>
-                <div id="megaSearchPreview" style="text-align:center;display:none;"><img id="previewImg" style="max-width:120px;max-height:80px;border-radius:4px;border:1px solid #444;"></div>
+                <div id="megaSearchPreview" class="search-preview-container" style="display:none;"><img id="previewImg" class="search-preview-img"></div>
                 <div id="megaSearchResults"><div style="text-align:center;color:#666;padding:15px;font-size:11px;">Upload image to find matches<br><span style="color:#888;font-size:10px;">v10.4: Balanced scoring (CH+FP+MS+Struct+Color)</span></div></div>
             </div>
         `;
@@ -405,14 +429,14 @@
                             <div class="search-result-meta">
                                 <span class="sim-badge ${badgeClass}">${m.matchType}</span>
                                 <div class="metrics-grid">
-                                    <span class="metric-label">CH:</span><span class="metric-value ${getClass(ch,70,50)}">${ch>=0?ch+'%':'-'}</span>
-                                    <span class="metric-label">FP:</span><span class="metric-value ${getClass(fp,55,40)}">${fp>=0?fp+'%':'-'}</span>
-                                    <span class="metric-label">MS:</span><span class="metric-value ${getClass(ms,65,50)}">${ms}%</span>
-                                    <span class="metric-label">Struct:</span><span class="metric-value ${getClass(st,70,50)}">${st}%</span>
-                                    <span class="metric-label">Color:</span><span class="metric-value ${getClass(cl,75,60)}">${cl>=0?cl+'%':'-'}</span>
+                                    <span class="metric-item"><span class="metric-label">Content:</span><span class="metric-value ${getClass(ch,70,50)}">${ch>=0?ch+'%':'-'}</span></span>
+                                    <span class="metric-item"><span class="metric-label">Fingerprint:</span><span class="metric-value ${getClass(fp,55,40)}">${fp>=0?fp+'%':'-'}</span></span>
+                                    <span class="metric-item"><span class="metric-label">Scale:</span><span class="metric-value ${getClass(ms,65,50)}">${ms}%</span></span>
+                                    <span class="metric-item"><span class="metric-label">Structure:</span><span class="metric-value ${getClass(st,70,50)}">${st}%</span></span>
+                                    <span class="metric-item"><span class="metric-label">Color:</span><span class="metric-value ${getClass(cl,75,60)}">${cl>=0?cl+'%':'-'}</span></span>
                                 </div>
                                 <span class="combined-score">${combined}%</span>
-                                <button class="btn-find-mega" data-filename="${escapeHtml(m.name)}">Go ➜</button>
+                                <button class="btn-find-mega" data-filename="${escapeHtml(m.name)}">Search ➜</button>
                             </div>
                         </div>
                     </div>`;
