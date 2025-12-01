@@ -1,16 +1,16 @@
 // ==UserScript==
-// @name         Mega.nz Deep Indexer — Unified v8.7 (Duplicate Fix)
-// @namespace    Violentmonkey Scripts
-// @match        https://mega.nz/*
-// @match        https://mega.io/*
-// @grant        GM.getValue
-// @grant        GM.setValue
-// @grant        GM.listValues
-// @grant        GM.deleteValue
-// @grant        unsafeWindow
-// @version      8.7
-// @author       Alex Tol (Fixed by Assistant)
-// @description  🕷️📷 Search + Color Boost + Hash Extractors. Fixes duplicate filename issues.
+// @name        Mega.nz Deep Indexer — Unified v8.8 (Improved Search)
+// @namespace   Violentmonkey Scripts
+// @match       https://mega.nz/*
+// @match       https://mega.io/*
+// @grant       GM.getValue
+// @grant       GM.setValue
+// @grant       GM.listValues
+// @grant       GM.deleteValue
+// @grant       unsafeWindow
+// @version     8.7
+// @author      Alex Tol (Fixed by Assistant)
+// @description 🕷️📷 Search + Color Boost + Hash Extractors. Fixes duplicate filename issues.
 // ==/UserScript==
 
 (function() {
@@ -35,29 +35,35 @@
     const FOLDER_SEARCH_DELAY = 200;
     const FOLDER_SEARCH_STEP = 1200;
     const NAVIGATION_DELAY = 3000;
-
     let cancelRequested = false;
     const visitedFolderKeys = new Set();
 
-    // Matcher Settings (TUNED FOR v8.6)
+    // Matcher Settings (TUNED FOR v8.7 - Color Boost)
     const CONFIG = {
         GLOBAL_HASH_SIZE: 16,
         PATCH_GRID: 9,
         PATCH_HASH_SIZE: 8,
         PATCH_GOOD_DIST: 10,
 
-        // Weights (Color is more important now)
-        WEIGHT_STRUCT: 0.60, // Было 0.70
-        WEIGHT_COLOR: 0.40,  // Было 0.30
+        // Base Weights (adjusted for better color recognition)
+        WEIGHT_STRUCT: 0.55,   // Было 0.60 - немного снижено
+        WEIGHT_COLOR: 0.45,    // Было 0.40 - немного увеличено
+
+        // Color Boost Settings (NEW!)
+        COLOR_BOOST_THRESHOLD: 0.85,  // Если цвет выше этого - даём бонус
+        COLOR_BOOST_STRUCT_MIN: 0.50, // Структура должна быть хотя бы такой
+        COLOR_BOOST_STRUCT_MAX: 0.82, // И не выше этого (иначе и так хороший score)
+        COLOR_BOOST_MULTIPLIER: 0.6,  // Сила бонуса
 
         // Thresholds
-        MIN_FINAL_SCORE: 0.72, // Общий порог остался тем же
-        MIN_STRUCT_SCORE: 0.45 // Снижено с 0.55 (Пропускаем больше искаженных форм)
+        MIN_FINAL_SCORE: 0.72,
+        MIN_STRUCT_SCORE: 0.45
     };
 
     // ==============================================
     // --- DEBUG TOOLS (EXPOSED TO CONSOLE) ---
     // ==============================================
+
     unsafeWindow.MegaDebug = {
         // 1. Получить хеш загруженной картинки для отправки разработчику
         getSearchHash: function() {
@@ -73,13 +79,17 @@
             if(!RAM_DB) await loadDatabaseToMemory();
             const found = RAM_DB.find(item => item.name.toLowerCase().includes(filenamePart.toLowerCase()));
             if (!found) return "❌ Файл не найден в базе (в RAM).";
-            const json = JSON.stringify({ globalHash: found.globalHash, blocks: found.blocks, colorSig: found.colorSig });
+            const json = JSON.stringify({
+                globalHash: found.globalHash,
+                blocks: found.blocks,
+                colorSig: found.colorSig
+            });
             console.log(`📋 DB HASH FOR '${found.name}' (COPY BELOW):`);
             console.log(json);
             return "DB Hash printed to console.";
         },
 
-        // 3. Сравнить (старая функция)
+        // 3. Сравнить с NEW v8.7 formula
         compare: function() {
             if (!window.LAST_SEARCH_DESC || !window.LAST_DB_RECORD) {
                 console.error("❌ Missing data. Upload image AND find file in DB tab first.");
@@ -94,7 +104,6 @@
             let strongMatches = 0;
             const blocksA = q.blocks;
             const blocksB = db.blocks;
-
             if (blocksA.length && blocksB.length) {
                 for (let a = 0; a < blocksA.length; a++) {
                     let best = 64;
@@ -110,17 +119,27 @@
 
             let colorScore = -1;
             let finalScore = structScore;
+            let colorBoost = 0;
 
             if (q.colorSig && db.colorSig) {
                 colorScore = getColorSim(q.colorSig, db.colorSig);
-                finalScore = (structScore * CONFIG.WEIGHT_STRUCT) + (colorScore * CONFIG.WEIGHT_COLOR);
+                
+                // NEW v8.7: Color Boost calculation
+                if (colorScore > CONFIG.COLOR_BOOST_THRESHOLD && 
+                    structScore >= CONFIG.COLOR_BOOST_STRUCT_MIN && 
+                    structScore < CONFIG.COLOR_BOOST_STRUCT_MAX) {
+                    colorBoost = (colorScore - CONFIG.COLOR_BOOST_THRESHOLD) * CONFIG.COLOR_BOOST_MULTIPLIER;
+                }
+                
+                finalScore = (structScore * CONFIG.WEIGHT_STRUCT) + (colorScore * CONFIG.WEIGHT_COLOR) + colorBoost;
             }
 
-            console.group("📊 v8.6 SIMULATION");
+            console.group("📊 v8.7 SIMULATION (Color Boost)");
             console.log(`Struct: ${(structScore*100).toFixed(2)}% (Weight: ${CONFIG.WEIGHT_STRUCT})`);
-            console.log(`Color:  ${(colorScore*100).toFixed(2)}% (Weight: ${CONFIG.WEIGHT_COLOR})`);
-            console.log(`FINAL:  ${(finalScore*100).toFixed(2)}%`);
-            console.log(`PASS?:  ${finalScore >= CONFIG.MIN_FINAL_SCORE ? '✅ YES' : '❌ NO'}`);
+            console.log(`Color: ${(colorScore*100).toFixed(2)}% (Weight: ${CONFIG.WEIGHT_COLOR})`);
+            console.log(`Color Boost: +${(colorBoost*100).toFixed(2)}%`);
+            console.log(`FINAL: ${(finalScore*100).toFixed(2)}%`);
+            console.log(`PASS?: ${finalScore >= CONFIG.MIN_FINAL_SCORE ? '✅ YES' : '❌ NO'}`);
             console.groupEnd();
         }
     };
@@ -156,10 +175,10 @@
     // ==============================================
     // --- WEB WORKER CODE ---
     // ==============================================
+
     const WORKER_CODE = `
     self.onmessage = function(e) {
         const { type, payload } = e.data;
-
         if (type === 'SEARCH') {
             const { db, query, config } = payload;
             const results = [];
@@ -206,7 +225,6 @@
                 let strongMatches = 0;
                 const blocksA = qBlocks;
                 const blocksB = record.blocks;
-
                 if (blocksA.length && blocksB.length) {
                     for (let a = 0; a < blocksA.length; a++) {
                         let best = 64;
@@ -224,12 +242,22 @@
                 // Lowered Threshold Check
                 if (structScore < config.MIN_STRUCT_SCORE) continue;
 
-                // 2. COLOR
+                // 2. COLOR + COLOR BOOST (v8.7)
                 let finalScore = 0;
                 let colorScore = 0;
+                let colorBoost = 0;
+
                 if (qColor && record.colorSig) {
                     colorScore = getColorSim(qColor, record.colorSig);
-                    finalScore = (structScore * config.WEIGHT_STRUCT) + (colorScore * config.WEIGHT_COLOR);
+                    
+                    // NEW v8.8: Color Boost - если цвет очень хорош, а структура средняя
+                    if (colorScore > config.COLOR_BOOST_THRESHOLD && 
+                        structScore >= config.COLOR_BOOST_STRUCT_MIN && 
+                        structScore < config.COLOR_BOOST_STRUCT_MAX) {
+                        colorBoost = (colorScore - config.COLOR_BOOST_THRESHOLD) * config.COLOR_BOOST_MULTIPLIER;
+                    }
+                    
+                    finalScore = (structScore * config.WEIGHT_STRUCT) + (colorScore * config.WEIGHT_COLOR) + colorBoost;
                 } else {
                     finalScore = structScore;
                     colorScore = -1;
@@ -239,6 +267,7 @@
                     let matchType = 'High';
                     if (structScore > 0.85 && (colorScore > 0.85 || colorScore === -1)) matchType = 'Exact';
                     else if (lSim >= 0.70) matchType = 'Crop/Part';
+                    else if (colorBoost > 0) matchType = 'ColorMatch';
 
                     results.push({
                         name: record.name,
@@ -246,6 +275,7 @@
                         nodeId: record.nodeId,
                         structSim: structScore,
                         colorSim: colorScore,
+                        colorBoost: colorBoost,
                         finalScore: finalScore,
                         matchType: matchType
                     });
@@ -272,103 +302,106 @@
     // ==============================================
     // --- STYLES ---
     // ==============================================
+
     const style = document.createElement('style');
     style.textContent = `
-        .mega-indexer-modal {
-            position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            width: 600px; max-height: 85vh;
-            background: #181818; color: #e0e0e0; z-index: 10000;
-            padding: 0; border-radius: 12px; box-shadow: 0 25px 80px rgba(0,0,0,0.95);
-            font-family: 'Segoe UI', sans-serif;
-            display: flex; flex-direction: column;
-            border: 1px solid #333; box-sizing: border-box;
-        }
-        .mega-indexer-header {
-            padding: 15px 20px; border-bottom: 1px solid #2a2a2a;
-            display: flex; justify-content: space-between; align-items: center;
-            background: #202020; border-radius: 12px 12px 0 0;
-        }
-        .mega-indexer-title { font-size: 18px; font-weight: 600; margin: 0; color: #fff; }
-        .mega-indexer-close {
-            cursor: pointer; font-size: 20px; color: #888; width: 30px; height: 30px;
-            text-align: center; line-height: 30px; transition: 0.2s;
-        }
-        .mega-indexer-close:hover { color: #fff; background: #c0392b; border-radius: 50%; }
-        .mega-indexer-body {
-            padding: 20px; overflow-y: auto; overflow-x: hidden; flex-grow: 1;
-            scrollbar-width: thin; scrollbar-color: #444 #181818;
-            display: flex; flex-direction: column; gap: 15px; box-sizing: border-box;
-        }
-        .progress-container {
-            width: 100%; background-color: #333; border-radius: 10px; height: 24px;
-            overflow: hidden; display: none; position: relative; box-sizing: border-box;
-        }
-        .progress-bar {
-            height: 100%; background-color: #28a745; width: 0%; transition: width 0.1s;
-        }
-        .progress-text {
-            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 11px; font-weight: bold; color: #fff;
-        }
-        .mega-file-input-label {
-            display: flex; flex-direction: column; align-items: center; justify-content: center;
-            padding: 30px; background: #222; border: 2px dashed #444; border-radius: 8px;
-            cursor: pointer; transition: 0.2s; color: #aaa; width: 100%; box-sizing: border-box;
-        }
-        .mega-file-input-label:hover { border-color: #8e44ad; color: #fff; background: #292929; }
-        .mega-btn {
-            padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer;
-            font-weight: bold; font-size: 13px; color: white; transition: 0.2s;
-            display: inline-block; margin-right: 10px;
-        }
-        .btn-primary { background: #007bff; } .btn-primary:hover { background: #0056b3; }
-        .btn-success { background: #28a745; } .btn-success:hover { background: #218838; }
-        .btn-danger { background: #dc3545; } .btn-danger:hover { background: #c82333; }
-        .btn-warning { background: #f39c12; color: #000; } .btn-warning:hover { background: #d35400; }
-
-        .search-result-item {
-            background: #222; padding: 12px; border-radius: 8px; border: 1px solid #333;
-            display: flex; gap: 15px; align-items: flex-start; width: 100%; box-sizing: border-box;
-        }
-        .search-result-info { flex-grow: 1; overflow: hidden; }
-        .search-result-name { font-size: 14px; color: #fff; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
-        .search-result-path { font-size: 11px; color: #888; margin-bottom: 8px; font-family: monospace; word-break: break-all; }
-        .search-result-meta { font-size: 11px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-        .sim-badge { padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; text-transform: uppercase; }
-        .sim-exact { background: rgba(46, 204, 113, 0.15); color: #2ecc71; border: 1px solid #2ecc71; }
-        .sim-crop { background: rgba(52, 152, 219, 0.15); color: #3498db; border: 1px solid #3498db; }
-        .sim-high { background: rgba(230, 126, 34, 0.15); color: #e67e22; border: 1px solid #e67e22; }
-        .btn-find-mega {
-            background: #2980b9; color: white; border: none; padding: 5px 15px;
-            border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: auto;
-        }
-        #mega-indexer-controls {
-            position: fixed; bottom: 20px; right: 20px; z-index: 9999;
-            display: flex; flex-direction: row; gap: 10px; align-items: center;
-            pointer-events: none;
-        }
-        #mega-indexer-controls button {
-            pointer-events: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-            font-family: 'Segoe UI', sans-serif; border: none; border-radius: 8px;
-            cursor: pointer; font-weight: bold; font-size: 14px; padding: 12px 18px;
-            transition: transform 0.1s;
-        }
-        .db-stat-box {
-            background: #252525; padding: 15px; border-radius: 8px; border: 1px solid #333;
-            text-align: center; width: 100%; box-sizing: border-box;
-        }
-        .db-stat-number { font-size: 24px; color: #2ecc71; font-weight: bold; }
-        .db-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; width: 100%; }
-        .db-debug-section { margin-top: 20px; border-top: 1px solid #333; padding-top: 10px; }
-        .db-debug-section input { width: 70%; padding: 8px; background: #222; border: 1px solid #444; color: white; border-radius: 4px; }
+    .mega-indexer-modal {
+        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        width: 600px; max-height: 85vh; background: #181818; color: #e0e0e0;
+        z-index: 10000; padding: 0; border-radius: 12px;
+        box-shadow: 0 25px 80px rgba(0,0,0,0.95); font-family: 'Segoe UI', sans-serif;
+        display: flex; flex-direction: column; border: 1px solid #333; box-sizing: border-box;
+    }
+    .mega-indexer-header {
+        padding: 15px 20px; border-bottom: 1px solid #2a2a2a;
+        display: flex; justify-content: space-between; align-items: center;
+        background: #202020; border-radius: 12px 12px 0 0;
+    }
+    .mega-indexer-title { font-size: 18px; font-weight: 600; margin: 0; color: #fff; }
+    .mega-indexer-close {
+        cursor: pointer; font-size: 20px; color: #888;
+        width: 30px; height: 30px; text-align: center; line-height: 30px; transition: 0.2s;
+    }
+    .mega-indexer-close:hover { color: #fff; background: #c0392b; border-radius: 50%; }
+    .mega-indexer-body {
+        padding: 20px; overflow-y: auto; overflow-x: hidden; flex-grow: 1;
+        scrollbar-width: thin; scrollbar-color: #444 #181818;
+        display: flex; flex-direction: column; gap: 15px; box-sizing: border-box;
+    }
+    .progress-container {
+        width: 100%; background-color: #333; border-radius: 10px; height: 24px;
+        overflow: hidden; display: none; position: relative; box-sizing: border-box;
+    }
+    .progress-bar { height: 100%; background-color: #28a745; width: 0%; transition: width 0.1s; }
+    .progress-text {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 11px; font-weight: bold; color: #fff;
+    }
+    .mega-file-input-label {
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        padding: 30px; background: #222; border: 2px dashed #444; border-radius: 8px;
+        cursor: pointer; transition: 0.2s; color: #aaa; width: 100%; box-sizing: border-box;
+    }
+    .mega-file-input-label:hover { border-color: #8e44ad; color: #fff; background: #292929; }
+    .mega-btn {
+        padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer;
+        font-weight: bold; font-size: 13px; color: white; transition: 0.2s;
+        display: inline-block; margin-right: 10px;
+    }
+    .btn-primary { background: #007bff; }
+    .btn-primary:hover { background: #0056b3; }
+    .btn-success { background: #28a745; }
+    .btn-success:hover { background: #218838; }
+    .btn-danger { background: #dc3545; }
+    .btn-danger:hover { background: #c82333; }
+    .btn-warning { background: #f39c12; color: #000; }
+    .btn-warning:hover { background: #d35400; }
+    .search-result-item {
+        background: #222; padding: 12px; border-radius: 8px; border: 1px solid #333;
+        display: flex; gap: 15px; align-items: flex-start; width: 100%; box-sizing: border-box;
+    }
+    .search-result-info { flex-grow: 1; overflow: hidden; }
+    .search-result-name { font-size: 14px; color: #fff; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
+    .search-result-path { font-size: 11px; color: #888; margin-bottom: 8px; font-family: monospace; word-break: break-all; }
+    .search-result-meta { font-size: 11px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .sim-badge { padding: 3px 8px; border-radius: 4px; font-weight: bold; font-size: 10px; text-transform: uppercase; }
+    .sim-exact { background: rgba(46, 204, 113, 0.15); color: #2ecc71; border: 1px solid #2ecc71; }
+    .sim-crop { background: rgba(52, 152, 219, 0.15); color: #3498db; border: 1px solid #3498db; }
+    .sim-high { background: rgba(230, 126, 34, 0.15); color: #e67e22; border: 1px solid #e67e22; }
+    .sim-color { background: rgba(155, 89, 182, 0.15); color: #9b59b6; border: 1px solid #9b59b6; }
+    .btn-find-mega {
+        background: #2980b9; color: white; border: none; padding: 5px 15px;
+        border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: auto;
+    }
+    #mega-indexer-controls {
+        position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+        display: flex; flex-direction: row; gap: 10px; align-items: center; pointer-events: none;
+    }
+    #mega-indexer-controls button {
+        pointer-events: auto; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+        font-family: 'Segoe UI', sans-serif; border: none; border-radius: 8px;
+        cursor: pointer; font-weight: bold; font-size: 14px; padding: 12px 18px; transition: transform 0.1s;
+    }
+    .db-stat-box {
+        background: #252525; padding: 15px; border-radius: 8px; border: 1px solid #333;
+        text-align: center; width: 100%; box-sizing: border-box;
+    }
+    .db-stat-number { font-size: 24px; color: #2ecc71; font-weight: bold; }
+    .db-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; width: 100%; }
+    .db-debug-section { margin-top: 20px; border-top: 1px solid #333; padding-top: 10px; }
+    .db-debug-section input {
+        width: 70%; padding: 8px; background: #222; border: 1px solid #444; color: white; border-radius: 4px;
+    }
     `;
     document.head.appendChild(style);
-    console.log('[Mega Unified] v8.7 loaded. Duplicate Fix.');
+
+    console.log('[Mega Unified] v8.7 loaded. Color Boost enabled.');
 
     // ==============================================
     // --- UI ELEMENTS ---
     // ==============================================
+
     let uiBtn, searchBtn, dbBtn, cancelBtn, statusDiv, searchPanel, dbPanel, controlsContainer;
     let progressBar, progressText, progressContainer;
 
@@ -378,7 +411,6 @@
             controlsContainer.id = 'mega-indexer-controls';
             document.body.appendChild(controlsContainer);
         }
-
         if (!dbBtn) {
             dbBtn = document.createElement('button');
             dbBtn.innerText = '💾 DB';
@@ -387,7 +419,6 @@
             dbBtn.onclick = toggleDBUI;
             controlsContainer.appendChild(dbBtn);
         }
-
         if (!searchBtn) {
             searchBtn = document.createElement('button');
             searchBtn.innerText = '🔍 Search';
@@ -396,7 +427,6 @@
             searchBtn.onclick = toggleSearchUI;
             controlsContainer.appendChild(searchBtn);
         }
-
         if (!uiBtn) {
             uiBtn = document.createElement('button');
             updateButtonText(initialCount);
@@ -405,22 +435,22 @@
             uiBtn.onclick = startDeepIndexing;
             controlsContainer.appendChild(uiBtn);
         }
-
         if (!cancelBtn) {
             cancelBtn = document.createElement('button');
             cancelBtn.innerText = '✖ Stop';
-            cancelBtn.style.cssText = `position: fixed; bottom: 75px; right: 20px; z-index: 9999; padding: 6px 12px; background-color: #d9534f; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 11px; box-shadow: 0 2px 5px rgba(0,0,0,0.4); opacity: 0.5;`;
+            cancelBtn.style.cssText = `position: fixed; bottom: 75px; right: 20px; z-index: 9999;
+                padding: 6px 12px; background-color: #d9534f; color: white; border: none;
+                border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 11px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.4); opacity: 0.5;`;
             cancelBtn.disabled = true;
-            cancelBtn.onclick = () => {
-                cancelRequested = true;
-                cancelBtn.innerText = 'Stopping...';
-            };
+            cancelBtn.onclick = () => { cancelRequested = true; cancelBtn.innerText = 'Stopping...'; };
             document.body.appendChild(cancelBtn);
         }
-
         if (!statusDiv) {
             statusDiv = document.createElement('div');
-            statusDiv.style.cssText = `position: fixed; bottom: 110px; right: 20px; z-index: 9999; padding: 5px 10px; background-color: rgba(0,0,0,0.8); color: #0f0; border-radius: 4px; font-size: 10px; font-family: monospace; max-width: 250px; display: none; pointer-events: none;`;
+            statusDiv.style.cssText = `position: fixed; bottom: 110px; right: 20px; z-index: 9999;
+                padding: 5px 10px; background-color: rgba(0,0,0,0.8); color: #0f0; border-radius: 4px;
+                font-size: 10px; font-family: monospace; max-width: 250px; display: none; pointer-events: none;`;
             document.body.appendChild(statusDiv);
         }
         initWorker();
@@ -435,12 +465,11 @@
     }
 
     function hideProgress() {
-        if (progressContainer) setTimeout(() => {
-            progressContainer.style.display = 'none';
-        }, 300);
+        if (progressContainer) setTimeout(() => { progressContainer.style.display = 'none'; }, 300);
     }
 
     // ========== DATABASE LOADING ==========
+
     async function loadDatabaseToMemory() {
         if (RAM_DB !== null) return;
         const keys = await GM.listValues();
@@ -452,14 +481,13 @@
             if (cancelRequested) break;
             const batchKeys = dbKeys.slice(i, i + batchSize);
             const values = await Promise.all(batchKeys.map(k => GM.getValue(k)));
-            values.forEach(v => {
-                if (v && v.blocks) RAM_DB.push(v);
-            });
+            values.forEach(v => { if (v && v.blocks) RAM_DB.push(v); });
             updateProgress(i + batchKeys.length, total, "Loading DB...");
         }
     }
 
     // ========== SEARCH LOGIC ==========
+
     function performWorkerSearch(queryDesc) {
         return new Promise((resolve, reject) => {
             if (!searchWorker) initWorker();
@@ -472,11 +500,15 @@
                 }
             };
             searchWorker.onerror = function(e) { reject(e.message); };
-            searchWorker.postMessage({ type: 'SEARCH', payload: { db: RAM_DB, query: queryDesc, config: CONFIG } });
+            searchWorker.postMessage({
+                type: 'SEARCH',
+                payload: { db: RAM_DB, query: queryDesc, config: CONFIG }
+            });
         });
     }
 
     // ========== DB MANAGER UI ==========
+
     async function toggleDBUI() {
         if (dbPanel) {
             dbPanel.style.display = dbPanel.style.display === 'none' ? 'flex' : 'none';
@@ -486,7 +518,6 @@
         dbPanel = document.createElement('div');
         dbPanel.className = 'mega-indexer-modal';
         ['mousedown', 'click'].forEach(ev => dbPanel.addEventListener(ev, e => e.stopPropagation()));
-
         dbPanel.innerHTML = `
             <div class="mega-indexer-header">
                 <h3 class="mega-indexer-title">💾 Database Manager</h3>
@@ -503,41 +534,38 @@
                     <button class="mega-btn btn-danger" id="btnClearDB">🗑 Clear</button>
                 </div>
                 <div class="db-debug-section">
-                     <div style="color:#aaa; font-size:12px; margin-bottom:5px;">Debug: Find Hash by Filename</div>
-                     <div style="display:flex; gap:5px;">
+                    <div style="color:#aaa; font-size:12px; margin-bottom:5px;">Debug: Find Hash by Filename</div>
+                    <div style="display:flex; gap:5px;">
                         <input type="text" id="dbDebugInput" placeholder="Enter partial filename...">
                         <button class="mega-btn btn-warning" id="btnDebugFind" style="padding: 8px;">Get Hash</button>
-                     </div>
-                     <div id="dbDebugStatus" style="margin-top:5px; font-size:11px; color:#ccc;"></div>
+                    </div>
+                    <div id="dbDebugStatus" style="margin-top:5px; font-size:11px; color:#ccc;"></div>
                 </div>
                 <input type="file" id="fileImportDB" accept=".json" style="display:none">
                 <div id="dbOpStatus" class="import-status"></div>
             </div>
         `;
         document.body.appendChild(dbPanel);
-
         document.getElementById('btnDBClose').onclick = () => dbPanel.style.display = 'none';
         document.getElementById('btnExportDB').onclick = exportDatabase;
         document.getElementById('btnClearDB').onclick = clearDatabase;
-
         const debugInput = document.getElementById('dbDebugInput');
         document.getElementById('btnDebugFind').onclick = async () => {
-             if(!RAM_DB) await loadDatabaseToMemory();
-             const term = debugInput.value.toLowerCase();
-             if(!term) return;
-             const found = RAM_DB.find(item => item.name.toLowerCase().includes(term));
-             const status = document.getElementById('dbDebugStatus');
-             if(found) {
-                 console.log("✅ [DEBUG] Database Record Found:", found);
-                 window.LAST_DB_RECORD = found;
-                 status.innerText = `Found: ${found.name}. Run MegaDebug.getDBHash() to share.`;
-                 status.style.color = "#2ecc71";
-             } else {
-                 status.innerText = "Not found in RAM DB.";
-                 status.style.color = "#e74c3c";
-             }
+            if(!RAM_DB) await loadDatabaseToMemory();
+            const term = debugInput.value.toLowerCase();
+            if(!term) return;
+            const found = RAM_DB.find(item => item.name.toLowerCase().includes(term));
+            const status = document.getElementById('dbDebugStatus');
+            if(found) {
+                console.log("✅ [DEBUG] Database Record Found:", found);
+                window.LAST_DB_RECORD = found;
+                status.innerText = `Found: ${found.name}. Run MegaDebug.compare() to test.`;
+                status.style.color = "#2ecc71";
+            } else {
+                status.innerText = "Not found in RAM DB.";
+                status.style.color = "#e74c3c";
+            }
         };
-
         const importInput = document.getElementById('fileImportDB');
         document.getElementById('btnImportTrigger').onclick = () => importInput.click();
         importInput.onchange = (e) => importDatabase(e.target.files[0]);
@@ -585,9 +613,7 @@
                 RAM_DB = null;
                 status.innerText = `✅ Imported ${count} items.`;
                 refreshDBStats();
-            } catch (err) {
-                status.innerText = `Error: ${err.message}`;
-            }
+            } catch (err) { status.innerText = `Error: ${err.message}`; }
         };
         reader.readAsText(file);
     }
@@ -602,6 +628,7 @@
     }
 
     // ========== SEARCH PANEL ==========
+
     function toggleSearchUI() {
         if (searchPanel) {
             searchPanel.style.display = searchPanel.style.display === 'none' ? 'flex' : 'none';
@@ -610,10 +637,9 @@
         searchPanel = document.createElement('div');
         searchPanel.className = 'mega-indexer-modal';
         ['mousedown', 'mouseup', 'click'].forEach(ev => searchPanel.addEventListener(ev, e => e.stopPropagation()));
-
         searchPanel.innerHTML = `
             <div class="mega-indexer-header">
-                <h3 class="mega-indexer-title">📷 Smart Search (HSV+Hash)</h3>
+                <h3 class="mega-indexer-title">📷 Smart Search v8.7 (Color Boost)</h3>
                 <div class="mega-indexer-close" id="btnSearchClose">✖</div>
             </div>
             <div class="mega-indexer-body">
@@ -643,10 +669,8 @@
         const closeBtn = document.getElementById('btnSearchClose');
         const fileInput = document.getElementById('megaSearchInput');
         const dropZone = document.getElementById('megaDropZone');
-
         closeBtn.onclick = () => searchPanel.style.display = 'none';
         fileInput.addEventListener('change', (e) => processFile(e.target.files[0]));
-
         ['dragenter','dragover','dragleave','drop'].forEach(n => dropZone.addEventListener(n, e => {e.preventDefault();e.stopPropagation()}, false));
         dropZone.addEventListener('dragenter', () => dropZone.classList.add('drag-over'));
         dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
@@ -678,10 +702,7 @@
 
             const tempImg = new Image();
             tempImg.src = imgUrl;
-            await new Promise((resolve, reject) => {
-                tempImg.onload = resolve;
-                tempImg.onerror = reject;
-            });
+            await new Promise((resolve, reject) => { tempImg.onload = resolve; tempImg.onerror = reject; });
 
             const queryDesc = await getImageDescriptor(tempImg);
             window.LAST_SEARCH_DESC = queryDesc;
@@ -704,10 +725,12 @@
                     const finalScore = Math.round(m.finalScore * 100);
                     const structScore = Math.round(m.structSim * 100);
                     const colorScore = m.colorSim === -1 ? 'N/A' : Math.round(m.colorSim * 100) + '%';
-
+                    const boostInfo = m.colorBoost > 0 ? ` (+${Math.round(m.colorBoost * 100)}% boost)` : '';
+                    
                     let badge = '';
                     if (m.matchType === 'Exact') badge = `<span class="sim-badge sim-exact">Exact: ${finalScore}%</span>`;
                     else if (m.matchType === 'Crop/Part') badge = `<span class="sim-badge sim-crop">Inside: ${finalScore}%</span>`;
+                    else if (m.matchType === 'ColorMatch') badge = `<span class="sim-badge sim-color">Color: ${finalScore}%</span>`;
                     else badge = `<span class="sim-badge sim-high">High: ${finalScore}%</span>`;
 
                     html += `
@@ -717,7 +740,8 @@
                             <div class="search-result-name">${escapeHtml(m.name)}</div>
                             <div class="search-result-path">${escapeHtml(m.path)}</div>
                             <div class="search-result-meta">
-                                ${badge} <span style="color:#aaa; font-size:10px;">Shape: ${structScore}% | Color: ${colorScore}</span>
+                                ${badge}
+                                <span style="color:#aaa; font-size:10px;">Shape: ${structScore}% | Color: ${colorScore}${boostInfo}</span>
                                 <button class="btn-find-mega" data-filename="${escapeHtml(m.name)}">🔍 Find</button>
                             </div>
                         </div>
@@ -756,6 +780,7 @@
     // ==============================================
     // --- PROCESSING & HSV HELPERS ---
     // ==============================================
+
     async function getImageDescriptor(img) {
         const w = img.naturalWidth || img.width;
         const h = img.naturalHeight || img.height;
@@ -766,7 +791,6 @@
         const grid = CONFIG.PATCH_GRID;
         const tileW = w / grid;
         const tileH = h / grid;
-
         for (let gy = 0; gy < grid; gy++) {
             for (let gx = 0; gx < grid; gx++) {
                 blocks.push(computeHash(img, gx * tileW, gy * tileH, tileW, tileH, CONFIG.PATCH_HASH_SIZE, 0.5));
@@ -814,7 +838,6 @@
         const pixels = imgData.data;
         const zoneSize = workSize / gridSize;
         const signature = [];
-
         for(let zy=0; zy<gridSize; zy++) {
             for(let zx=0; zx<gridSize; zx++) {
                 let sumH=0, sumS=0, sumV=0, count=0;
@@ -823,15 +846,11 @@
                         const i = (y * workSize + x) * 4;
                         const r = pixels[i], g = pixels[i+1], b = pixels[i+2];
                         const [h,s,v] = rgbToHsv(r,g,b);
-                        sumH += h; sumS += s; sumV += v;
-                        count++;
+                        sumH += h; sumS += s; sumV += v; count++;
                     }
                 }
-                if(count > 0) {
-                    signature.push([ sumH/count, sumS/count, sumV/count ]);
-                } else {
-                    signature.push([0,0,0]);
-                }
+                if(count > 0) { signature.push([ sumH/count, sumS/count, sumV/count ]); }
+                else { signature.push([0,0,0]); }
             }
         }
         return signature;
@@ -843,9 +862,8 @@
         var h, s, v = max;
         var d = max - min;
         s = max == 0 ? 0 : d / max;
-        if (max == min) {
-            h = 0;
-        } else {
+        if (max == min) { h = 0; }
+        else {
             switch (max) {
                 case r: h = (g - b) / d + (g < b ? 6 : 0); break;
                 case g: h = (b - r) / d + 2; break;
@@ -859,46 +877,18 @@
     // ==============================================
     // --- UTILS & CRAWLER ---
     // ==============================================
-    function updateButtonText(count) {
-        if (uiBtn) uiBtn.innerText = `📷 Scan Folders (DB: ${count})`;
-    }
 
-    function updateStatus(text) {
-        if (statusDiv) {
-            statusDiv.innerText = text;
-            statusDiv.style.display = text ? 'block' : 'none';
-        }
-    }
-
-    async function getDBCount() {
-        try {
-            return (await GM.listValues()).filter(k => k.startsWith(DB_PREFIX)).length;
-        } catch (e) { return 0; }
-    }
-
-    async function addFileToDB(fileData) {
-        try {
-            await GM.setValue(DB_PREFIX + fileData.nodeId, fileData);
-        } catch (e) {}
-    }
-
-    async function checkFileExists(nodeId) {
-        try {
-            return !!(await GM.getValue(DB_PREFIX + nodeId));
-        } catch (e) { return false; }
-    }
-
-    function escapeHtml(str) {
-        return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-    }
-
+    function updateButtonText(count) { if (uiBtn) uiBtn.innerText = `📷 Scan Folders (DB: ${count})`; }
+    function updateStatus(text) { if (statusDiv) { statusDiv.innerText = text; statusDiv.style.display = text ? 'block' : 'none'; } }
+    async function getDBCount() { try { return (await GM.listValues()).filter(k => k.startsWith(DB_PREFIX)).length; } catch (e) { return 0; } }
+    async function addFileToDB(fileData) { try { await GM.setValue(DB_PREFIX + fileData.nodeId, fileData); } catch (e) {} }
+    async function checkFileExists(nodeId) { try { return !!(await GM.getValue(DB_PREFIX + nodeId)); } catch (e) { return false; } }
+    function escapeHtml(str) { return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
     function getCurrentPath() {
         let path = '';
-        document.querySelectorAll('.fm-breadcrumbs').forEach(c => {
-            path += '/' + (c.innerText || '').trim();
-        });
+        document.querySelectorAll('.fm-breadcrumbs').forEach(c => { path += '/' + (c.innerText || '').trim(); });
         return path || '/root';
     }
 
@@ -910,10 +900,7 @@
             let allReady = true;
             for (let img of imagesToWait) {
                 const isBlob = img.src && img.src.startsWith('blob:');
-                if (!isBlob || !img.complete || img.naturalWidth === 0) {
-                    allReady = false;
-                    break;
-                }
+                if (!isBlob || !img.complete || img.naturalWidth === 0) { allReady = false; break; }
             }
             if (allReady) return;
             await delay(200);
@@ -923,7 +910,6 @@
     async function scanCurrentFolder() {
         const scroller = document.querySelector('.file-block-scrolling');
         if (!scroller) return 0;
-
         scroller.scrollTop = 0;
         await delay(1000);
 
@@ -938,22 +924,14 @@
             for (let img of images) {
                 let fileContainer = img.closest('[id^="th_"]') || img.closest('.mega-item-square') || img.closest('a.mega-node');
                 if (!fileContainer && img.parentElement) fileContainer = img.parentElement.parentElement;
-
                 let name = 'Unknown';
                 if (fileContainer) {
                     const nameEl = fileContainer.querySelector('.block-view-file-name, .file-name, .fm-item-name');
                     if (nameEl) name = (nameEl.innerText || '').split('\n')[0].trim();
                 }
 
-                // --- FIX START: Improved ID generation to handle duplicates ---
                 let nodeId = fileContainer?.id?.startsWith('th_') ? fileContainer.id : (fileContainer?.dataset?.nodeId || null);
-
-                // Если системный ID не найден, генерируем уникальный ID на основе ПУТИ и ИМЕНИ.
-                // Раньше здесь было только имя, поэтому файлы с одинаковыми именами в разных папках считались дубликатами.
-                if (!nodeId) {
-                    nodeId = 'gen_' + getCurrentPath() + '_' + name;
-                }
-                // --- FIX END ---
+                if (!nodeId) { nodeId = 'gen_' + getCurrentPath() + '_' + name; }
 
                 if (!processedIDs.has(nodeId) && !(await checkFileExists(nodeId))) {
                     candidates.push({ img, nodeId, name });
@@ -963,53 +941,36 @@
             }
 
             const imgsToWait = candidates.map(c => c.img);
-            if (imgsToWait.length > 0) {
-                await waitForBatchLoading(imgsToWait, IMAGE_LOAD_TIMEOUT);
-            }
+            if (imgsToWait.length > 0) { await waitForBatchLoading(imgsToWait, IMAGE_LOAD_TIMEOUT); }
 
             for (let item of candidates) {
                 if (cancelRequested) break;
                 const { img, nodeId, name } = item;
-
                 if (!img.complete || img.naturalWidth === 0 || !img.src.startsWith('blob:')) continue;
-
                 try {
                     const desc = await getImageDescriptor(img);
                     if (!desc) continue;
-
                     const record = {
-                        nodeId,
-                        name,
-                        path: getCurrentPath(),
-                        globalHash: desc.globalHash,
-                        blocks: desc.blocks,
-                        colorSig: desc.colorSig,
+                        nodeId, name, path: getCurrentPath(),
+                        globalHash: desc.globalHash, blocks: desc.blocks, colorSig: desc.colorSig,
                         timestamp: Date.now()
                     };
-
                     await addFileToDB(record);
                     if (RAM_DB) RAM_DB.push(record);
-
                     processedIDs.add(nodeId);
                     processedCount++;
                     updateStatus(`Indexed: ${processedCount}`);
-                } catch (err) {
-                    console.error(err);
-                }
+                } catch (err) { console.error(err); }
             }
 
             if (cancelRequested) break;
-
             const prevScrollTop = scroller.scrollTop;
             scroller.scrollBy(0, FILE_SCROLL_STEP);
             await delay(FILE_SCROLL_DELAY);
-
             if (Math.abs(scroller.scrollTop - prevScrollTop) < 5) {
                 stuckCounter++;
                 if (stuckCounter >= 2) break;
-            } else {
-                stuckCounter = 0;
-            }
+            } else { stuckCounter = 0; }
         }
         return processedCount;
     }
@@ -1020,10 +981,7 @@
 
     function goBack() {
         const crumbs = document.querySelectorAll('.fm-breadcrumbs');
-        if (crumbs.length >= 2) {
-            crumbs[crumbs.length - 2].click();
-            return true;
-        }
+        if (crumbs.length >= 2) { crumbs[crumbs.length - 2].click(); return true; }
         return false;
     }
 
@@ -1040,10 +998,7 @@
         document.querySelectorAll('.mega-node.folder, tr.megaListItem .folder, .mega-item-square .folder').forEach(node => {
             const container = node.closest('.mega-node, tr.megaListItem, .mega-item-square') || node;
             const name = getFolderName(container);
-            if (name && !seen.has(name)) {
-                seen.add(name);
-                result.push({ element: container, name });
-            }
+            if (name && !seen.has(name)) { seen.add(name); result.push({ element: container, name }); }
         });
         return result;
     }
@@ -1058,15 +1013,10 @@
 
     async function deepScanCurrentFolder(depth = 0, maxDepth = 50) {
         if (cancelRequested || depth > maxDepth) return;
-
         console.log(`[Mega Unified] 📁 [Level ${depth}] ${getCurrentPath()}`);
         await scanCurrentFolder();
-
         const scroller = document.querySelector('.file-block-scrolling');
-        if (scroller) {
-            scroller.scrollTop = 0;
-            await delay(1000);
-        }
+        if (scroller) { scroller.scrollTop = 0; await delay(1000); }
 
         while (!cancelRequested) {
             const nextFolder = findNextUnvisitedFolder();
@@ -1077,21 +1027,15 @@
                     await delay(FOLDER_SEARCH_DELAY);
                     if (Math.abs(scroller.scrollTop - prev) < 5) break;
                     continue;
-                } else {
-                    break;
-                }
+                } else { break; }
             }
-
             visitedFolderKeys.add(nextFolder.key);
             updateStatus(`>>> ${nextFolder.name}`);
             await delay(500);
-
             triggerDoubleClick(nextFolder.element);
             await waitForContentChange();
-
             await deepScanCurrentFolder(depth + 1, maxDepth);
             if (cancelRequested) break;
-
             goBack();
             await waitForContentChange();
         }
@@ -1134,5 +1078,4 @@
             createUI(await getDBCount());
         }
     }, 1000);
-
 })();
